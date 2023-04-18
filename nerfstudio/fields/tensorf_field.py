@@ -87,10 +87,10 @@ class TensoRFField(Field):
         positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
         positions = positions * 2 - 1
         density = self.density_encoding(positions)
-        density_enc = torch.sum(density, dim=-1)[:, :, None]
+        density_enc = torch.sum(density, dim=-1)[..., None]
         relu = torch.nn.ReLU()
         density_enc = relu(density_enc)
-        return density_enc
+        return density_enc, None
 
     def get_outputs(self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None) -> TensorType:
         d = ray_samples.frustums.directions
@@ -126,7 +126,7 @@ class TensoRFField(Field):
             base_rgb = bg_color.repeat(ray_samples[:, :, None].shape)
             if mask.any():
                 input_rays = ray_samples[mask, :]
-                density = self.get_density(input_rays)
+                density, _ = self.get_density(input_rays)
                 rgb = self.get_outputs(input_rays, None)
 
                 base_density[mask] = density
@@ -138,7 +138,34 @@ class TensoRFField(Field):
             density = base_density
             rgb = base_rgb
         else:
-            density = self.get_density(ray_samples)
+            density, _ = self.get_density(ray_samples)
             rgb = self.get_outputs(ray_samples, None)
 
         return {FieldHeadNames.DENSITY: density, FieldHeadNames.RGB: rgb}
+
+    def get_opacity(self, positions: TensorType["bs":..., 3], step_size) -> TensorType["bs":..., 1]:
+        """Returns the opacity for a position. Used primarily by the occupancy grid.
+
+        Args:
+            positions: the positions to evaluate the opacity at.
+            step_size: the step size to use for the opacity evaluation.
+        """
+        density = self.density_fn(positions)
+        ## TODO: We should scale step size based on the distortion. Currently it uses too much memory.
+        # aabb_min, aabb_max = self.aabb[0], self.aabb[1]
+        # if self.contraction_type is not ContractionType.AABB:
+        #     x = (positions - aabb_min) / (aabb_max - aabb_min)
+        #     x = x * 2 - 1  # aabb is at [-1, 1]
+        #     mag = x.norm(dim=-1, keepdim=True)
+        #     mask = mag.squeeze(-1) > 1
+
+        #     dev = (2 * mag - 1) / mag**2 + 2 * x**2 * (1 / mag**3 - (2 * mag - 1) / mag**4)
+        #     dev[~mask] = 1.0
+        #     dev = torch.clamp(dev, min=1e-6)
+        #     step_size = step_size / dev.norm(dim=-1, keepdim=True)
+        # else:
+        #     step_size = step_size * (aabb_max - aabb_min)
+
+        opacity = density * step_size
+        return opacity
+

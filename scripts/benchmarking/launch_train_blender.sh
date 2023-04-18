@@ -1,21 +1,29 @@
 #!/bin/bash
 
+export OMP_NUM_THREADS=8
+
 helpFunction_launch_train()
 {
    echo "Usage: $0 -m <method_name> [-v <vis>] [-s] [<gpu_list>]"
    echo -e "\t-m name of config to benchmark (e.g. mipnerf, instant_ngp)"
    echo -e "\t-v <vis>: Visualization method. <vis> can be wandb or tensorboard. Default is wandb."
+   echo -e "\t-e total epochs"
+   echo -n "\t-n: experiment name subfix"
    echo -e "\t-s: Launch a single training job per gpu."
    echo -e "\t<gpu_list> [OPTIONAL] list of space-separated gpu numbers to launch train on (e.g. 0 2 4 5)"
    exit 1 # Exit program after printing help
 }
 
-vis="wandb"
+vis="tensorboard"
 single=false
-while getopts "m:v:s" opt; do
+epochs=30000
+subfix=""
+while getopts "m:v:e:n:s" opt; do
     case "$opt" in
         m ) method_name="$OPTARG" ;;
         v ) vis="$OPTARG" ;;
+        e ) epochs="$OPTARG" ;;
+        n ) subfix="$OPTARG" ;;
         s ) single=true ;;
         ? ) helpFunction ;; 
     esac
@@ -52,7 +60,7 @@ if [ -z "${GPU_IDX[0]+x}" ]; then
 fi
 echo "available gpus... ${GPU_IDX[*]}"
 
-DATASETS=("mic" "ficus" "chair" "hotdog" "materials" "drums" "ship" "lego")
+DATASETS=("lego" "ficus" "chair" "mic" "hotdog" "materials" "drums" "ship" )
 date
 tag=$(date +'%Y-%m-%d')
 idx=0
@@ -77,15 +85,16 @@ for dataset in "${DATASETS[@]}"; do
     fi
     export CUDA_VISIBLE_DEVICES="${GPU_IDX[$idx]}"
     ns-train "${method_name}" "${method_opts[@]}" \
-             --data="data/blender/${dataset}${trans_file}" \
-             --experiment-name="blender_${dataset}_${tag}" \
+             --data="/data3/dataset_nerf/nerf_synthetic/${dataset}${trans_file}" \
+             --experiment-name="blender_${dataset}_${tag}_${subfix}" \
              --relative-model-dir=nerfstudio_models/ \
              --steps-per-save=1000 \
-             --max-num-iterations=16500 \
+             --max-num-iterations="${epochs}" \
              --logging.local-writer.enable=False  \
              --logging.enable-profiler=False \
              --vis "${vis}" \
              --timestamp "$timestamp" \
+             --pipeline.datamanager.camera-optimizer.mode off \
              ${dataparser} & GPU_PID[$idx]=$!
     echo "Launched ${method_name} ${dataset} on gpu ${GPU_IDX[$idx]}, ${tag}"
     
@@ -97,4 +106,4 @@ echo "Done."
 echo "Launch eval with:"
 s=""
 $single && s="-s"
-echo "$(dirname "$0")/launch_eval_blender.sh -m $method_name -o outputs/ -t $timestamp $s"
+echo "$(dirname "$0")/launch_eval_blender.sh -m $method_name -n ${subfix} -o outputs/ -t $timestamp $s"

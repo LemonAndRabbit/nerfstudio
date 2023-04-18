@@ -1,22 +1,26 @@
 #!/bin/bash
 
+export OMP_NUM_THREADS=8
+
 helpFunction_launch_eval()
 {
    echo "Usage: $0 -m <method_name> -o <output_dir> -t <timestamp> [-s] [<gpu_list>]"
    echo -e "\t-m name of method to benchmark (e.g. nerfacto, instant-ngp)"
    echo -e "\t-o base directory for where all the benchmarks are stored (e.g. outputs/)"
    echo -e "\t-t <timestamp>: if using launch_train_blender.sh will be of format %Y-%m-%d_%H%M%S"
+   echo -n "\t-n: experiment name subfix"
    echo -e "\t-s: Launch a single evaluation job per gpu."
    echo -e "\t<gpu_list> [OPTIONAL] list of space-separated gpu numbers to launch train on (e.g. 0 2 4 5)"
    exit 1 # Exit program after printing help
 }
 
 single=false
-while getopts "m:o:t:s" opt; do
+while getopts "m:o:t:n:s" opt; do
     case "$opt" in
         m ) method_name="$OPTARG" ;;
         o ) output_dir="$OPTARG" ;;
         t ) timestamp="$OPTARG" ;;
+        n ) subfix="$OPTARG" ;;
         s ) single=true ;;
         ? ) helpFunction_launch_eval ;; 
     esac
@@ -70,9 +74,9 @@ for dataset in "${DATASETS[@]}"; do
         wait "${GPU_PID[$idx]}"
     fi
     export CUDA_VISIBLE_DEVICES=${GPU_IDX[$idx]}
-    config_path="${output_dir}/blender_${dataset}_${timestamp::-7}/${method_name}/${timestamp}/config.yml"
+    config_path="${output_dir}/blender_${dataset}_${timestamp::-7}_${subfix}/${method_name}/${timestamp}/config.yml"
     ns-eval --load-config="${config_path}" \
-            --output-path="${output_dir}/${method_name}/blender_${dataset}_${timestamp}.json" & GPU_PID[$idx]=$!
+            --output-path="${output_dir}/${method_name}/blender_${dataset}_${timestamp}_${subfix}.json" & GPU_PID[$idx]=$!
     echo "Launched ${config_path} on gpu ${GPU_IDX[$idx]}"
 
     # update gpu

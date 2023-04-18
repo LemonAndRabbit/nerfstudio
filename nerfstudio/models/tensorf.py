@@ -45,7 +45,7 @@ from nerfstudio.field_components.encodings import (
 from nerfstudio.field_components.field_heads import FieldHeadNames
 from nerfstudio.fields.tensorf_field import TensoRFField
 from nerfstudio.model_components.losses import MSELoss
-from nerfstudio.model_components.ray_samplers import PDFSampler, UniformSampler
+from nerfstudio.model_components.ray_samplers import PDFSampler, UniformSampler, VolumetricSampler
 from nerfstudio.model_components.renderers import (
     AccumulationRenderer,
     DepthRenderer,
@@ -54,6 +54,9 @@ from nerfstudio.model_components.renderers import (
 from nerfstudio.model_components.scene_colliders import AABBBoxCollider
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import colormaps, colors, misc
+
+import nerfacc
+from nerfacc import ContractionType
 
 
 @dataclass
@@ -81,6 +84,16 @@ class TensoRFModelConfig(ModelConfig):
     appearance_dim: int = 27
     """Number of channels for color encoding"""
     tensorf_encoding: Literal["triplane", "vm", "cp"] = "vm"
+    
+    yzf_mode: bool = False
+    """yzf mode where use uniform sampler"""
+    yzf_mode2: bool = False
+    """yzf mode where use occupancy sampler"""
+    render_step_size: float = 0.01
+    """Minimum step size for rendering, only used in yzf_mode2"""
+
+    enable_single_jitter: bool = True
+    """enable single jitter"""
 
 
 class TensoRFModel(Model):
@@ -115,6 +128,8 @@ class TensoRFModel(Model):
             .astype("int")
             .tolist()[1:]
         )
+        self.yzf_mode = config.yzf_mode
+        self.yzf_mode2 = config.yzf_mode2
         super().__init__(config=config, **kwargs)
 
     def get_training_callbacks(
@@ -148,6 +163,16 @@ class TensoRFModel(Model):
                     )
                 )
 
+        if self.yzf_mode2:
+            def update_occupancy_grid(step: int):
+                # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
+                # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
+                self.occupancy_grid.every_n_step(
+                    step=step,
+                    occ_eval_fn=lambda x: self.field.get_opacity(x, self.config.render_step_size),
+                )
+
+
         callbacks = [
             TrainingCallback(
                 where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
@@ -156,6 +181,15 @@ class TensoRFModel(Model):
                 args=[self, training_callback_attributes],
             )
         ]
+
+        if self.yzf_mode2:
+            callbacks.append(
+                TrainingCallback(
+                    where_to_run=[TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
+                    update_every_num_iters=1,
+                    func=update_occupancy_grid,
+                )
+            )
         return callbacks
 
     def update_to_step(self, step: int) -> None:
@@ -222,13 +256,33 @@ class TensoRFModel(Model):
         )
 
         # samplers
-        self.sampler_uniform = UniformSampler(num_samples=self.config.num_uniform_samples, single_jitter=True)
-        self.sampler_pdf = PDFSampler(num_samples=self.config.num_samples, single_jitter=True, include_original=False)
+        if self.yzf_mode:
+            self.sampler = UniformSampler(num_samples=self.config.num_uniform_samples, single_jitter=True)
+        elif self.yzf_mode2:
+            self.scene_aabb = Parameter(self.scene_box.aabb.flatten(), requires_grad=False)
+
+            # Occupancy Grid
+            self.occupancy_grid = nerfacc.OccupancyGrid(
+                roi_aabb=self.scene_aabb,
+                resolution=128,
+                contraction_type=ContractionType.AABB
+            )
+
+            # TODO: need to support other contraction types
+            vol_sampler_aabb = self.scene_box.aabb
+            self.sampler = VolumetricSampler(
+                scene_aabb=vol_sampler_aabb,
+                occupancy_grid=self.occupancy_grid,
+                density_fn=self.field.density_fn,
+            )
+        else:
+            self.sampler_uniform = UniformSampler(num_samples=self.config.num_uniform_samples, single_jitter=True)
+            self.sampler_pdf = PDFSampler(num_samples=self.config.num_samples, single_jitter=self.config.enable_single_jitter, include_original=False)
 
         # renderers
         self.renderer_rgb = RGBRenderer(background_color=colors.WHITE)
         self.renderer_accumulation = AccumulationRenderer()
-        self.renderer_depth = DepthRenderer()
+        self.renderer_depth = DepthRenderer(method="expected" if self.yzf_mode2 else "median")
 
         # losses
         self.rgb_loss = MSELoss()
@@ -257,9 +311,86 @@ class TensoRFModel(Model):
         return param_groups
 
     def get_outputs(self, ray_bundle: RayBundle):
+        if self.yzf_mode:
+            return self.get_outputs_mode1(ray_bundle)
+        elif self.yzf_mode2:
+            return self.get_outputs_mode2(ray_bundle)
+        else:
+            return self.get_outputs_old(ray_bundle)
+
+    def get_outputs_mode1(self, ray_bundle: RayBundle):
+        ray_samples_uniform = self.sampler(ray_bundle)
+        dens, _ = self.field.get_density(ray_samples_uniform)
+        weights = ray_samples_uniform.get_weights(dens)
+        coarse_accumulation = self.renderer_accumulation(weights)
+        acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)
+
+        field_outputs_fine = self.field.forward(
+            ray_samples_uniform, mask=acc_mask, bg_color=colors.WHITE.to(weights.device)
+        )
+
+        weights_fine = weights
+
+        accumulation = self.renderer_accumulation(weights_fine)
+        depth = self.renderer_depth(weights_fine, ray_samples_uniform)
+
+        rgb = self.renderer_rgb(
+            rgb=field_outputs_fine[FieldHeadNames.RGB],
+            weights=weights_fine,
+        )
+
+        rgb = torch.where(accumulation < 0, colors.WHITE.to(rgb.device), rgb)
+        accumulation = torch.clamp(accumulation, min=0)
+
+        outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
+        return outputs
+
+    def get_outputs_mode2(self, ray_bundle: RayBundle):
+        num_rays = len(ray_bundle)
+        with torch.no_grad():
+            ray_samples, ray_indices = self.sampler(
+                ray_bundle=ray_bundle,
+                near_plane=2,
+                far_plane=6,
+                render_step_size=self.config.render_step_size,
+                cone_angle=0)
+        
+        field_outputs = self.field(ray_samples)
+
+        # accumulation
+        packed_info = nerfacc.pack_info(ray_indices, num_rays)
+        weights = nerfacc.render_weight_from_density(
+            packed_info=packed_info,
+            sigmas=field_outputs[FieldHeadNames.DENSITY],
+            t_starts=ray_samples.frustums.starts,
+            t_ends=ray_samples.frustums.ends,
+        )
+
+        rgb = self.renderer_rgb(
+            rgb=field_outputs[FieldHeadNames.RGB],
+            weights=weights,
+            ray_indices=ray_indices,
+            num_rays=num_rays,
+        )
+
+        rgb = self.renderer_rgb(
+            rgb=field_outputs[FieldHeadNames.RGB],
+            weights=weights,
+            ray_indices=ray_indices,
+            num_rays=num_rays,
+        )
+        depth = self.renderer_depth(
+            weights=weights, ray_samples=ray_samples, ray_indices=ray_indices, num_rays=num_rays
+        )
+        accumulation = self.renderer_accumulation(weights=weights, ray_indices=ray_indices, num_rays=num_rays)
+
+        outputs = {"rgb": rgb, "accumulation": accumulation, "depth": depth}
+        return outputs
+
+    def get_outputs_old(self, ray_bundle: RayBundle):
         # uniform sampling
         ray_samples_uniform = self.sampler_uniform(ray_bundle)
-        dens = self.field.get_density(ray_samples_uniform)
+        dens, _ = self.field.get_density(ray_samples_uniform)
         weights = ray_samples_uniform.get_weights(dens)
         coarse_accumulation = self.renderer_accumulation(weights)
         acc_mask = torch.where(coarse_accumulation < 0.0001, False, True).reshape(-1)

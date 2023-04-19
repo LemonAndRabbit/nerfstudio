@@ -386,7 +386,7 @@ class VanillaPipeline(Pipeline):
         state = {
             (key[len("module.") :] if key.startswith("module.") else key): value for key, value in loaded_state.items()
         }
-        self.model.update_to_step(step)
+        self.model.update_to_step(step, state)
         self.load_state_dict(state, strict=True)
 
     def get_training_callbacks(

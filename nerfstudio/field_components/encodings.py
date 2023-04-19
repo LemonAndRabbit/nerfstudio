@@ -474,6 +474,115 @@ class TensorVMEncoding(Encoding):
         self.plane_coef, self.line_coef = torch.nn.Parameter(plane_coef), torch.nn.Parameter(line_coef)
         self.resolution = resolution
 
+class TensorVMSplitEncoding(Encoding):
+    """Learned vector-matrix encoding proposed by TensoRF
+
+    Args:
+        resolution: Resolution of grid.
+        num_components: Number of components per dimension.
+        init_scale: Initialization scale.
+    """
+
+    # plane_coef: TensorType[3, "num_components", "resolution", "resolution"]
+    # line_coef: TensorType[3, "num_components", "resolution", 1]
+
+    vec_modes = [[0,1], [0,2], [1,2]]
+    app_modes = [2, 1, 0]
+
+    def __init__(
+        self,
+        resolution: int = 128,
+        num_components: int = 24,
+        init_scale: float = 0.1,
+    ) -> None:
+        super().__init__(in_dim=3)
+
+        self.resolution = resolution
+        self.num_components = num_components
+
+        plane_coef, line_coef = [], []
+
+        for _ in range(3):
+            plane_coef.append(nn.Parameter(init_scale * torch.randn((1, num_components, resolution, resolution))))
+            line_coef.append(nn.Parameter(init_scale * torch.randn((1, num_components, resolution, 1))))
+        
+        self.plane_coef = nn.ParameterList(plane_coef)
+        self.line_coef = nn.ParameterList(line_coef)
+
+    def get_out_dim(self) -> int:
+        return self.num_components * 3
+
+    def forward(self, in_tensor: TensorType["bs":..., "input_dim"]) -> TensorType["bs":..., "output_dim"]:
+        """Compute encoding for each position in in_positions
+
+        Args:
+            in_tensor: position inside bounds in range [-1,1],
+
+        Returns: Encoded position
+        """
+        plane_coord = torch.stack([in_tensor[..., [0, 1]], in_tensor[..., [0, 2]], in_tensor[..., [1, 2]]])  # [3,...,2]
+        line_coord = torch.stack([in_tensor[..., 2], in_tensor[..., 1], in_tensor[..., 0]])  # [3, ...]
+        line_coord = torch.stack([torch.zeros_like(line_coord), line_coord], dim=-1)  # [3, ...., 2]
+
+        # Stop gradients from going to sampler
+        plane_coord = plane_coord.view(3, -1, 1, 2).detach()
+        line_coord = line_coord.view(3, -1, 1, 2).detach()
+
+        # plane_features = F.grid_sample(self.plane_coef, plane_coord, align_corners=True)  # [3, Components, -1, 1]
+        # line_features = F.grid_sample(self.line_coef, line_coord, align_corners=True)  # [3, Components, -1, 1]
+
+        plane_features, line_features = [], []
+        for idx_plane in range(len(self.plane_coef)):
+            plane_features.append(F.grid_sample(self.plane_coef[idx_plane], plane_coord[[idx_plane]], align_corners=True))
+            line_features.append(F.grid_sample(self.line_coef[idx_plane], line_coord[[idx_plane]], align_corners=True))
+
+        plane_features = torch.cat(plane_features, dim=0)
+        line_features = torch.cat(line_features, dim=0)
+
+        features = plane_features * line_features  # [3, Components, -1, 1]
+        features = torch.moveaxis(features.view(3 * self.num_components, *in_tensor.shape[:-1]), 0, -1)
+
+        return features  # [..., 3 * Components]
+
+    @torch.no_grad()
+    def upsample_grid(self, resolution) -> None:
+        """Upsamples underlying feature grid
+
+        Args:
+            resolution: Target resolution.
+        """
+        for idx_plane in range(len(self.plane_coef)):
+            vec_mode0, vec_mode1 = self.vec_modes[idx_plane]
+            app_mode = self.app_modes[idx_plane]
+            self.plane_coef[idx_plane] = torch.nn.Parameter(
+                F.interpolate(
+                    self.plane_coef[idx_plane].data, size=(resolution[vec_mode0], resolution[vec_mode1]), mode="bilinear", align_corners=True
+                )
+            )
+            self.line_coef[idx_plane] = torch.nn.Parameter(
+                F.interpolate(
+                    self.line_coef[idx_plane].data, size=(resolution[app_mode], 1), mode="bilinear", align_corners=True
+                    )
+            )
+        
+        self.resolution = resolution
+
+    @torch.no_grad()
+    def shrink_grid(self, tl, br) -> torch.Tensor:
+        """Shrinks underlying feature grid"""
+        
+        for idx_plane in range(len(self.plane_coef)):
+            vec_mode0, vec_mode1 = self.vec_modes[idx_plane]
+            app_mode = self.app_modes[idx_plane]
+
+            self.plane_coef[idx_plane] = torch.nn.Parameter(
+                self.plane_coef[idx_plane].data[..., tl[vec_mode0]:br[vec_mode0], tl[vec_mode1]:br[vec_mode1]]
+            )
+            self.line_coef[idx_plane] = torch.nn.Parameter(
+                self.line_coef[idx_plane].data[..., tl[app_mode]:br[app_mode],:]
+            )
+
+
 
 class TriplaneEncoding(Encoding):
     """Learned triplane encoding

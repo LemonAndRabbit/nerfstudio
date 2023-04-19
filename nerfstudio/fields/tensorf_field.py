@@ -55,6 +55,8 @@ class TensoRFField(Field):
         # whether to use spherical harmonics as the feature decoding function
         sh_levels: int = 2,
         # number of levels to use for spherical harmonics
+        density_activation: str = 'relu',
+        # relu | softplus: type of activation function to use for density
     ) -> None:
         super().__init__()
         self.aabb = Parameter(aabb, requires_grad=False)
@@ -83,13 +85,19 @@ class TensoRFField(Field):
 
         self.field_output_rgb = RGBFieldHead(in_dim=self.mlp_head.get_out_dim(), activation=nn.Sigmoid())
 
+        if not hasattr(self, 'density_actvation') or density_activation == 'relu':
+            self.density_activation = nn.ReLU()
+            self.density_offset = 0
+        elif density_activation == 'softplus':
+            self.density_activation = nn.Softplus()
+            self.density_offset = -10
+
     def get_density(self, ray_samples: RaySamples) -> TensorType:
         positions = SceneBox.get_normalized_positions(ray_samples.frustums.get_positions(), self.aabb)
         positions = positions * 2 - 1
         density = self.density_encoding(positions)
         density_enc = torch.sum(density, dim=-1)[..., None]
-        relu = torch.nn.ReLU()
-        density_enc = relu(density_enc)
+        density_enc = self.density_activation(density_enc + self.density_offset)
         return density_enc, None
 
     def get_outputs(self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None) -> TensorType:
@@ -169,3 +177,38 @@ class TensoRFField(Field):
         opacity = density * step_size
         return opacity
 
+    @torch.no_grad()
+    def shrink_grid(self, new_aabb: torch.Tensor) -> torch.Tensor:
+        """Shrinks the aabb of the scene box.
+
+        Args:
+            new_aabb: the new aabb to shrink to.
+        """
+        old_aabb_min, old_aabb_max = self.aabb
+        old_resolution = self.color_encoding.resolution
+        if type(old_resolution) == int:
+            old_resolution = torch.Tensor([old_resolution,]*3)
+        unit_size = (old_aabb_max - old_aabb_min) / old_resolution
+        xyz_min, xyz_max = new_aabb
+        tl, br = (xyz_min - old_aabb_min)/unit_size, (xyz_max - old_aabb_max)/unit_size
+        tl, br = torch.floor(tl), torch.ceil(br)
+        br = torch.stack([br, old_resolution]).amin(0)
+
+        self.color_encoding.shrink(tl, br)
+        self.density_encoding.shrink(tl, br)
+        
+        # new_aabb = torch.cat([old_aabb_min + tl*unit_size, old_aabb_max - br*unit_size])
+        self.aabb[0, :] += tl*unit_size
+        self.aabb[1, :] -= br*unit_size
+
+    @torch.no_grad()
+    def upsample_grid(self, resolution:int) -> None:
+        """Upsample grid resolution."""
+        n_voxels = resolution ** 3
+        xyz_min, xyz_max = self.aabb
+        dim = len(xyz_min)
+        voxel_size = ((xyz_max - xyz_min).prod() / n_voxels).pow(1 / dim)
+        true_resolution = ((xyz_max - xyz_min) / voxel_size).long().tolist()
+
+        self.color_encoding.upsample_grid(true_resolution)
+        self.density_encoding.upsample_grid(true_resolution)

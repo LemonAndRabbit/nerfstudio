@@ -60,7 +60,8 @@ if [ -z "${GPU_IDX[0]+x}" ]; then
 fi
 echo "available gpus... ${GPU_IDX[*]}"
 
-DATASETS=("lego" "ficus" "chair" "mic" "hotdog" "materials" "drums" "ship" )
+# DATASETS=("lego" "ficus" "chair" "mic" "hotdog" "materials" "drums" "ship" )
+DATASETS=("lego")
 date
 tag=$(date +'%Y-%m-%d')
 idx=0
@@ -85,7 +86,7 @@ for dataset in "${DATASETS[@]}"; do
     fi
     export CUDA_VISIBLE_DEVICES="${GPU_IDX[$idx]}"
     ns-train "${method_name}" "${method_opts[@]}" \
-             --data="/data3/dataset_nerf/nerf_synthetic/${dataset}${trans_file}" \
+             --data="/data1/dataset_nerf/nerf_synthetic/${dataset}${trans_file}" \
              --experiment-name="blender_${dataset}_${tag}_${subfix}" \
              --relative-model-dir=nerfstudio_models/ \
              --steps-per-save=1000 \
@@ -95,6 +96,8 @@ for dataset in "${DATASETS[@]}"; do
              --vis "${vis}" \
              --timestamp "$timestamp" \
              --pipeline.datamanager.camera-optimizer.mode off \
+             --pipeline.model.yzf_mode2=True \
+             --pipeline.model.shrinking=True \
              ${dataparser} & GPU_PID[$idx]=$!
     echo "Launched ${method_name} ${dataset} on gpu ${GPU_IDX[$idx]}, ${tag}"
     

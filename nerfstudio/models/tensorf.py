@@ -40,6 +40,7 @@ from nerfstudio.field_components.encodings import (
     NeRFEncoding,
     TensorCPEncoding,
     TensorVMEncoding,
+    TensorVMSplitEncoding,
     TriplaneEncoding,
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
@@ -94,6 +95,13 @@ class TensoRFModelConfig(ModelConfig):
 
     enable_single_jitter: bool = True
     """enable single jitter"""
+    density_activation: str = 'relu',
+    """density activation"""
+
+    shrinking: bool = False
+    """enable shrinking from occupancy grid"""
+    shrinking_iters: Tuple[int, ...] = (2000, 4000)
+
 
 
 class TensoRFModel(Model):
@@ -130,6 +138,12 @@ class TensoRFModel(Model):
         )
         self.yzf_mode = config.yzf_mode
         self.yzf_mode2 = config.yzf_mode2
+        self.shrinking = config.shrinking
+        self.shrinking_iters = config.shrinking_iters
+
+        assert self.yzf_mode2 or not self.shrinking, "Must enable occupancy_grid to enable shrinking"
+        assert not self.shrinking or set(self.shrinking_iters) < set(self.upsampling_iters), \
+            "Shrinking iterations must be a subset of upsampling iterations"
         super().__init__(config=config, **kwargs)
 
     def get_training_callbacks(
@@ -143,8 +157,9 @@ class TensoRFModel(Model):
             resolution = self.upsampling_steps[index]
 
             # upsample the position and direction grids
-            self.field.density_encoding.upsample_grid(resolution)
-            self.field.color_encoding.upsample_grid(resolution)
+            # self.field.density_encoding.upsample_grid(resolution)
+            # self.field.color_encoding.upsample_grid(resolution)
+            self.field.upsample_grid(resolution)
 
             # reinitialize the encodings optimizer
             optimizers_config = training_callback_attributes.optimizers.config
@@ -163,15 +178,32 @@ class TensoRFModel(Model):
                     )
                 )
 
-        if self.yzf_mode2:
-            def update_occupancy_grid(step: int):
-                # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
-                # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
-                self.occupancy_grid.every_n_step(
-                    step=step,
-                    occ_eval_fn=lambda x: self.field.get_opacity(x, self.config.render_step_size),
-                )
+        def update_occupancy_grid(step: int):
+            # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
+            # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
+            self.occupancy_grid.every_n_step(
+                step=step,
+                occ_eval_fn=lambda x: self.field.get_opacity(x, self.config.render_step_size),
+            )
 
+        def shrink_tensorf_grids(step: int):
+            occupancy_grid = self.occupancy_grid._binary
+            aabb = self.scene_box.aabb
+
+            xyzs = torch.stack(torch.meshgrid(
+                torch.linspace(0, 1, occupancy_grid.shape[0]),
+                torch.linspace(0, 1, occupancy_grid.shape[1]),
+                torch.linspace(0, 1, occupancy_grid.shape[2]),
+            ), -1).to(aabb.device)
+
+            xyzs = xyzs * (aabb[1] - aabb[0]) + aabb[0]
+            valid_xyzs = xyzs[occupancy_grid]
+
+            new_aabb = torch.cat([valid_xyzs.amin(0), valid_xyzs.amax(0)]).view((2,3))
+
+            print(f'shrink to size: {new_aabb}')
+
+            self.field.shrink_grid(new_aabb)
 
         callbacks = [
             TrainingCallback(
@@ -181,6 +213,18 @@ class TensoRFModel(Model):
                 args=[self, training_callback_attributes],
             )
         ]
+
+        if self.shrinking:
+            # shrinking grid size should be done before the upsampling and optimizer reinitialization
+            callbacks.insert(
+                0,
+                TrainingCallback(
+                    where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                    iters=self.shrinking_iters,
+                    func=shrink_tensorf_grids,
+                    args=[self,],
+                )
+            )
 
         if self.yzf_mode2:
             callbacks.append(
@@ -192,7 +236,7 @@ class TensoRFModel(Model):
             )
         return callbacks
 
-    def update_to_step(self, step: int) -> None:
+    def update_to_step(self, step: int, state_dict) -> None:
         if step < self.upsampling_iters[0]:
             return
 
@@ -201,6 +245,8 @@ class TensoRFModel(Model):
 
         index = new_iters.index(step + 1)
         new_grid_resolution = self.upsampling_steps[index - 1]
+
+        self.field.aabb[:] = state_dict['_model.field.aabb']
 
         self.field.density_encoding.upsample_grid(new_grid_resolution)  # type: ignore
         self.field.color_encoding.upsample_grid(new_grid_resolution)  # type: ignore
@@ -211,11 +257,11 @@ class TensoRFModel(Model):
 
         # setting up fields
         if self.config.tensorf_encoding == "vm":
-            density_encoding = TensorVMEncoding(
+            density_encoding = TensorVMSplitEncoding(
                 resolution=self.init_resolution,
                 num_components=self.num_den_components,
             )
-            color_encoding = TensorVMEncoding(
+            color_encoding = TensorVMSplitEncoding(
                 resolution=self.init_resolution,
                 num_components=self.num_color_components,
             )
@@ -253,17 +299,18 @@ class TensoRFModel(Model):
             head_mlp_num_layers=2,
             head_mlp_layer_width=128,
             use_sh=False,
+            density_activation=self.config.density_activation,
         )
 
         # samplers
         if self.yzf_mode:
             self.sampler = UniformSampler(num_samples=self.config.num_uniform_samples, single_jitter=True)
         elif self.yzf_mode2:
-            self.scene_aabb = Parameter(self.scene_box.aabb.flatten(), requires_grad=False)
+            flat_aabb = Parameter(self.scene_box.aabb.flatten(), requires_grad=False)
 
             # Occupancy Grid
             self.occupancy_grid = nerfacc.OccupancyGrid(
-                roi_aabb=self.scene_aabb,
+                roi_aabb=flat_aabb,
                 resolution=128,
                 contraction_type=ContractionType.AABB
             )

@@ -24,6 +24,7 @@ from typing import Dict, List, Tuple, Type
 import numpy as np
 import torch
 from torch.nn import Parameter
+import torch.nn.functional as F
 from torchmetrics import PeakSignalNoiseRatio
 from torchmetrics.functional import structural_similarity_index_measure
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -95,7 +96,7 @@ class TensoRFModelConfig(ModelConfig):
 
     enable_single_jitter: bool = True
     """enable single jitter"""
-    density_activation: str = 'relu',
+    density_activation: str = 'softplus',
     """density activation"""
 
     shrinking: bool = False
@@ -142,7 +143,7 @@ class TensoRFModel(Model):
         self.shrinking_iters = config.shrinking_iters
 
         assert self.yzf_mode2 or not self.shrinking, "Must enable occupancy_grid to enable shrinking"
-        assert not self.shrinking or set(self.shrinking_iters) < set(self.upsampling_iters), \
+        assert not self.shrinking or set(self.shrinking_iters) <= set(self.upsampling_iters), \
             "Shrinking iterations must be a subset of upsampling iterations"
         super().__init__(config=config, **kwargs)
 
@@ -186,24 +187,45 @@ class TensoRFModel(Model):
                 occ_eval_fn=lambda x: self.field.get_opacity(x, self.config.render_step_size),
             )
 
-        def shrink_tensorf_grids(step: int):
-            occupancy_grid = self.occupancy_grid._binary
-            aabb = self.scene_box.aabb
+        def shrink_tensorf_grids(self, step: int):
+            cur_reso = self.field.color_encoding.resolution
+            aabb = self.field.aabb
 
             xyzs = torch.stack(torch.meshgrid(
-                torch.linspace(0, 1, occupancy_grid.shape[0]),
-                torch.linspace(0, 1, occupancy_grid.shape[1]),
-                torch.linspace(0, 1, occupancy_grid.shape[2]),
+                torch.linspace(0, 1, cur_reso[0].item()),
+                torch.linspace(0, 1, cur_reso[1].item()),
+                torch.linspace(0, 1, cur_reso[2].item()),
             ), -1).to(aabb.device)
 
             xyzs = xyzs * (aabb[1] - aabb[0]) + aabb[0]
-            valid_xyzs = xyzs[occupancy_grid]
 
+            step_size = ((aabb[1] - aabb[0]) / cur_reso).mean()*0.5/25
+            alpha = self.field.get_opacity(xyzs, step_size).squeeze(-1)
+
+            xyzs = xyzs.transpose(0,2).contiguous()
+            alpha = alpha.clamp(0,1).transpose(0,2).contiguous()[None,None]
+
+            print(f"alpha: mean:{alpha.mean()}, 50%:{alpha.flatten().topk(int(alpha.numel()*0.5))[0].min()}")
+            alpha = 1 - torch.exp(-alpha)
+            print(f"alpha: mean:{alpha.mean()}, 50%:{alpha.flatten().topk(int(alpha.numel()*0.5))[0].min()}")
+
+
+            ks = 3
+            print(alpha.shape)
+            alpha = F.max_pool3d(alpha, kernel_size=ks, padding=ks // 2, stride=1).view((cur_reso[2], cur_reso[1], cur_reso[0]))
+            print(alpha.shape)
+            alpha[alpha>=0.01] = 1
+            alpha[alpha<0.01] = 0
+
+            valid_xyzs = xyzs[alpha>0.5]
+            print(valid_xyzs.shape)
             new_aabb = torch.cat([valid_xyzs.amin(0), valid_xyzs.amax(0)]).view((2,3))
+            print(f"target new_aabb: {new_aabb}")
 
-            print(f'shrink to size: {new_aabb}')
+            new_aabb = self.field.shrink_grid(new_aabb)
+            self.sampler.scene_aabb = new_aabb.flatten()
 
-            self.field.shrink_grid(new_aabb)
+            print(f"new aabb: {new_aabb}")
 
         callbacks = [
             TrainingCallback(
@@ -246,10 +268,11 @@ class TensoRFModel(Model):
         index = new_iters.index(step + 1)
         new_grid_resolution = self.upsampling_steps[index - 1]
 
-        self.field.aabb[:] = state_dict['_model.field.aabb']
+        if '_model.field.aabb' in state_dict:
+            self.field.aabb[:] = state_dict['_model.field.aabb']
+            self.sampler.scene_aabb[:] = state_dict['_model.field.aabb'].flatten()
 
-        self.field.density_encoding.upsample_grid(new_grid_resolution)  # type: ignore
-        self.field.color_encoding.upsample_grid(new_grid_resolution)  # type: ignore
+        self.field.upsample_grid(new_grid_resolution)  # type: ignore
 
     def populate_modules(self):
         """Set the fields and modules"""
@@ -473,7 +496,9 @@ class TensoRFModel(Model):
 
         rgb_loss = self.rgb_loss(image, outputs["rgb"])
 
-        loss_dict = {"rgb_loss": rgb_loss}
+        l1_loss = self.field.l1_loss() * 8e-5
+
+        loss_dict = {"rgb_loss": rgb_loss, "l1_loss": l1_loss}
         loss_dict = misc.scale_dict(loss_dict, self.config.loss_coefficients)
         return loss_dict
 

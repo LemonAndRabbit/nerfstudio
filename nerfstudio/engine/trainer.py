@@ -68,7 +68,7 @@ class TrainerConfig(ExperimentConfig):
     """Number of steps between randomly sampled batches of rays."""
     steps_per_eval_image: int = 500
     """Number of steps between single eval images."""
-    steps_per_eval_all_images: int = 25000
+    steps_per_eval_all_images: int = 29999
     """Number of steps between eval all images."""
     max_num_iterations: int = 1000000
     """Maximum number of iterations to run."""
@@ -444,6 +444,7 @@ class Trainer:
                 writer.put_image(name=group + "/" + image_name, image=image, step=step)
 
         # all eval images
-        if step_check(step, self.config.steps_per_eval_all_images):
+        # if step_check(step, self.config.steps_per_eval_all_images):
+        if step in [25000, 29999]:
             metrics_dict = self.pipeline.get_average_eval_image_metrics(step=step)
             writer.put_dict(name="Eval Images Metrics Dict (all images)", scalar_dict=metrics_dict, step=step)

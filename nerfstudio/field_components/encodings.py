@@ -497,7 +497,7 @@ class TensorVMSplitEncoding(Encoding):
     ) -> None:
         super().__init__(in_dim=3)
 
-        self.resolution = resolution
+        self.register_buffer("resolution", torch.Tensor([resolution,]*3).to(dtype=int))
         self.num_components = num_components
 
         plane_coef, line_coef = [], []
@@ -544,6 +544,17 @@ class TensorVMSplitEncoding(Encoding):
 
         return features  # [..., 3 * Components]
 
+    def l1_loss(self) -> torch.Tensor:
+        """Computes l1 loss of coefficients
+
+        Returns: L1 loss
+        """
+        total = 0
+        for idx_plane in range(len(self.plane_coef)):
+            total += torch.mean(torch.abs(self.plane_coef[idx_plane])) + torch.mean(torch.abs(self.line_coef[idx_plane]))
+
+        return total
+
     @torch.no_grad()
     def upsample_grid(self, resolution) -> None:
         """Upsamples underlying feature grid
@@ -565,7 +576,7 @@ class TensorVMSplitEncoding(Encoding):
                     )
             )
         
-        self.resolution = resolution
+        self.resolution[:] = resolution
 
     @torch.no_grad()
     def shrink_grid(self, tl, br) -> torch.Tensor:
@@ -576,10 +587,10 @@ class TensorVMSplitEncoding(Encoding):
             app_mode = self.app_modes[idx_plane]
 
             self.plane_coef[idx_plane] = torch.nn.Parameter(
-                self.plane_coef[idx_plane].data[..., tl[vec_mode0]:br[vec_mode0], tl[vec_mode1]:br[vec_mode1]]
+                self.plane_coef[idx_plane].data[..., tl[vec_mode0]:self.plane_coef[idx_plane].shape[-2]-br[vec_mode0], tl[vec_mode1]:self.plane_coef[idx_plane].shape[-1]-br[vec_mode1]]
             )
             self.line_coef[idx_plane] = torch.nn.Parameter(
-                self.line_coef[idx_plane].data[..., tl[app_mode]:br[app_mode],:]
+                self.line_coef[idx_plane].data[..., tl[app_mode]:self.line_coef[idx_plane].shape[-2]-br[app_mode],:]
             )
 
 

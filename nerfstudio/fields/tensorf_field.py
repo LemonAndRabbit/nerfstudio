@@ -97,7 +97,7 @@ class TensoRFField(Field):
         positions = positions * 2 - 1
         density = self.density_encoding(positions)
         density_enc = torch.sum(density, dim=-1)[..., None]
-        density_enc = self.density_activation(density_enc + self.density_offset)
+        density_enc = self.density_activation(density_enc + self.density_offset) * 25
         return density_enc, None
 
     def get_outputs(self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None) -> TensorType:
@@ -176,6 +176,10 @@ class TensoRFField(Field):
 
         opacity = density * step_size
         return opacity
+    
+    def l1_loss(self) -> torch.Tensor:
+        """Returns the l1 loss for the scene box."""
+        return self.density_encoding.l1_loss()
 
     @torch.no_grad()
     def shrink_grid(self, new_aabb: torch.Tensor) -> torch.Tensor:
@@ -186,20 +190,21 @@ class TensoRFField(Field):
         """
         old_aabb_min, old_aabb_max = self.aabb
         old_resolution = self.color_encoding.resolution
-        if type(old_resolution) == int:
-            old_resolution = torch.Tensor([old_resolution,]*3)
         unit_size = (old_aabb_max - old_aabb_min) / old_resolution
-        xyz_min, xyz_max = new_aabb
-        tl, br = (xyz_min - old_aabb_min)/unit_size, (xyz_max - old_aabb_max)/unit_size
-        tl, br = torch.floor(tl), torch.ceil(br)
-        br = torch.stack([br, old_resolution]).amin(0)
+        xyz_min, xyz_max = new_aabb.to(self.aabb.device)
+        tl, br = (xyz_min - old_aabb_min)/unit_size, (old_aabb_max-xyz_max)/unit_size
+        tl, br = torch.floor(tl), torch.floor(br)
+        tl, br = tl.to(dtype=int), br.to(dtype=int)
+        print(f"tl: {tl}, br: {br}")
 
-        self.color_encoding.shrink(tl, br)
-        self.density_encoding.shrink(tl, br)
+        self.color_encoding.shrink_grid(tl, br)
+        self.density_encoding.shrink_grid(tl, br)
         
         # new_aabb = torch.cat([old_aabb_min + tl*unit_size, old_aabb_max - br*unit_size])
         self.aabb[0, :] += tl*unit_size
         self.aabb[1, :] -= br*unit_size
+
+        return self.aabb
 
     @torch.no_grad()
     def upsample_grid(self, resolution:int) -> None:
@@ -208,7 +213,9 @@ class TensoRFField(Field):
         xyz_min, xyz_max = self.aabb
         dim = len(xyz_min)
         voxel_size = ((xyz_max - xyz_min).prod() / n_voxels).pow(1 / dim)
-        true_resolution = ((xyz_max - xyz_min) / voxel_size).long().tolist()
+        true_resolution = ((xyz_max - xyz_min) / voxel_size).to(dtype=int)
+
+        print(f"true resolution: {true_resolution}")
 
         self.color_encoding.upsample_grid(true_resolution)
         self.density_encoding.upsample_grid(true_resolution)

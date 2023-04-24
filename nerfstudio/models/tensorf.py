@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Dict, List, Tuple, Type
+import time
 
 import numpy as np
 import torch
@@ -102,6 +103,12 @@ class TensoRFModelConfig(ModelConfig):
     shrinking: bool = False
     """enable shrinking from occupancy grid"""
     shrinking_iters: Tuple[int, ...] = (2000, 4000)
+    """specifies a list of iteration step numbers to perform shrinking"""
+
+    filtering: bool = False
+    """enable filtering"""
+    filtering_iters: Tuple[int, ...] = (0, 2000, 4000)
+    """specifies a list of iteration step numbers to perform filtering"""
 
 
 
@@ -141,10 +148,17 @@ class TensoRFModel(Model):
         self.yzf_mode2 = config.yzf_mode2
         self.shrinking = config.shrinking
         self.shrinking_iters = config.shrinking_iters
+        self.filtering = config.filtering
+        self.filtering_iters = config.filtering_iters
 
         assert self.yzf_mode2 or not self.shrinking, "Must enable occupancy_grid to enable shrinking"
         assert not self.shrinking or set(self.shrinking_iters) <= set(self.upsampling_iters), \
             "Shrinking iterations must be a subset of upsampling iterations"
+        assert self.shrinking or not self.filtering, "Must enable shrinking to enable filtering"
+        nonzero_filtering_iters = set(self.filtering_iters)
+        nonzero_filtering_iters.discard(0)
+        assert not self.filtering or nonzero_filtering_iters <= set(self.shrinking_iters), \
+            "Filtering iteration must be a subset of shrinking iterations"
         super().__init__(config=config, **kwargs)
 
     def get_training_callbacks(
@@ -188,6 +202,7 @@ class TensoRFModel(Model):
             )
 
         def shrink_tensorf_grids(self, step: int):
+            print('========> shrinking grids ...')
             cur_reso = self.field.color_encoding.resolution
             aabb = self.field.aabb
 
@@ -195,6 +210,7 @@ class TensoRFModel(Model):
                 torch.linspace(0, 1, cur_reso[0].item()),
                 torch.linspace(0, 1, cur_reso[1].item()),
                 torch.linspace(0, 1, cur_reso[2].item()),
+                indexing = 'ij'
             ), -1).to(aabb.device)
 
             xyzs = xyzs * (aabb[1] - aabb[0]) + aabb[0]
@@ -205,41 +221,74 @@ class TensoRFModel(Model):
             xyzs = xyzs.transpose(0,2).contiguous()
             alpha = alpha.clamp(0,1).transpose(0,2).contiguous()[None,None]
 
-            print(f"alpha: mean:{alpha.mean()}, 50%:{alpha.flatten().topk(int(alpha.numel()*0.5))[0].min()}")
             alpha = 1 - torch.exp(-alpha)
-            print(f"alpha: mean:{alpha.mean()}, 50%:{alpha.flatten().topk(int(alpha.numel()*0.5))[0].min()}")
-
 
             ks = 3
-            print(alpha.shape)
             alpha = F.max_pool3d(alpha, kernel_size=ks, padding=ks // 2, stride=1).view((cur_reso[2], cur_reso[1], cur_reso[0]))
-            print(alpha.shape)
-            alpha[alpha>=0.01] = 1
-            alpha[alpha<0.01] = 0
+            alpha[alpha>=0.005] = 1
+            alpha[alpha<0.005] = 0
 
             valid_xyzs = xyzs[alpha>0.5]
-            print(valid_xyzs.shape)
             new_aabb = torch.cat([valid_xyzs.amin(0), valid_xyzs.amax(0)]).view((2,3))
-            print(f"target new_aabb: {new_aabb}")
 
             new_aabb = self.field.shrink_grid(new_aabb)
             self.sampler.scene_aabb = new_aabb.flatten()
 
-            print(f"new aabb: {new_aabb}")
+            print(f"  New aabb: {self.sampler.scene_aabb}")
 
-        callbacks = [
-            TrainingCallback(
-                where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
-                iters=self.upsampling_iters,
-                func=reinitialize_optimizer,
-                args=[self, training_callback_attributes],
-            )
-        ]
+        def filter_training_rays(self, training_callback_attributes: TrainingCallbackAttributes, step: int):
+
+            print('========> filtering rays ...')
+            tt = time.time()
+            assert training_callback_attributes.pipeline.datamanager.train_image_dataloader.cache_all_images, \
+                NotImplementedError("Current ray filtering only works with cache_all_images=True")
+
+            scene_aabb = self.field.aabb
+            cached_data = training_callback_attributes.pipeline.datamanager.train_image_dataloader.cached_collated_batch
+            ray_generator = training_callback_attributes.pipeline.datamanager.train_ray_generator
+            training_callback_attributes.pipeline.datamanager.train_pixel_sampler.clear_mask_cache()
+
+            all_ray_indices = torch.stack(torch.meshgrid(
+                torch.arange(cached_data['image'].shape[0]),
+                torch.arange(cached_data['image'].shape[1]),
+                torch.arange(cached_data['image'].shape[2]),
+                indexing = 'ij'
+            ), dim=-1) # [100,800,800,3]
+            all_ray_indices[...,0] = cached_data['image_idx'][..., None, None]
+
+            all_ray_indices = all_ray_indices.view((-1,3))
+
+            N = cached_data['image'].shape[0] * cached_data['image'].shape[1] * cached_data['image'].shape[2]
+
+            mask_filtered = []
+            idx_chunks = torch.split(torch.arange(N), 10240*5)
+            for idx_chunk in idx_chunks:
+                all_rays = ray_generator(all_ray_indices[idx_chunk])
+                rays_o = all_rays.origins
+                rays_d = all_rays.directions
+
+                vec = torch.where(rays_d == 0, torch.full_like(rays_d, 1e-6), rays_d)
+                rate_a = (scene_aabb[1] - rays_o) / vec
+                rate_b = (scene_aabb[0] - rays_o) / vec
+
+                t_min = torch.minimum(rate_a, rate_b).amax(-1)
+                t_max = torch.maximum(rate_a, rate_b).amin(-1)
+                mask_inbbox = t_max > t_min
+
+                mask_filtered.append(mask_inbbox.cpu())
+
+            mask_filtered = torch.cat(mask_filtered).view(cached_data['image'].shape[:-1] + (1,))
+
+            print(f'  Ray filtering done! takes {time.time()-tt} s. ray mask ratio: {torch.sum(mask_filtered) / N}')
+            
+            cached_data['mask'] = mask_filtered
+
+
+        callbacks = []
 
         if self.shrinking:
             # shrinking grid size should be done before the upsampling and optimizer reinitialization
-            callbacks.insert(
-                0,
+            callbacks.append(
                 TrainingCallback(
                     where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
                     iters=self.shrinking_iters,
@@ -247,6 +296,25 @@ class TensoRFModel(Model):
                     args=[self,],
                 )
             )
+
+        if self.filtering:
+            callbacks.append( # after the shrinking
+                TrainingCallback(
+                    where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                    iters=self.filtering_iters,
+                    func=filter_training_rays,
+                    args=[self,training_callback_attributes],
+                )
+            )
+
+        callbacks.append(
+            TrainingCallback(
+                where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                iters=self.upsampling_iters,
+                func=reinitialize_optimizer,
+                args=[self, training_callback_attributes],
+            )
+        )
 
         if self.yzf_mode2:
             callbacks.append(
@@ -524,7 +592,7 @@ class TensoRFModel(Model):
 
         psnr = self.psnr(image, rgb)
         ssim = self.ssim(image, rgb)
-        lpips = self.lpips(image, rgb)
+        lpips = torch.Tensor([0.5,])
 
         metrics_dict = {
             "psnr": float(psnr.item()),

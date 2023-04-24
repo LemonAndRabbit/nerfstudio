@@ -62,9 +62,11 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
             mask: mask of possible pixels in an image to sample from.
         """
         if isinstance(mask, torch.Tensor):
-            nonzero_indices = torch.nonzero(mask[..., 0], as_tuple=False)
-            chosen_indices = random.sample(range(len(nonzero_indices)), k=batch_size)
-            indices = nonzero_indices[chosen_indices]
+            if not hasattr(self, "_nonzero_indices"):
+                self._nonzero_indices = torch.nonzero(mask[..., 0], as_tuple=False)
+            chosen_indices = random.sample(range(len(self._nonzero_indices)), k=batch_size)
+            # chosen_indices = np.random.randint(0, self._indice_len, batch_size)
+            indices = self._nonzero_indices[chosen_indices]
         else:
             indices = torch.floor(
                 torch.rand((batch_size, 3), device=device)
@@ -72,6 +74,11 @@ class PixelSampler:  # pylint: disable=too-few-public-methods
             ).long()
 
         return indices
+
+    def clear_mask_cache(self):
+        """Clears the cache for the mask."""
+        if hasattr(self, "_nonzero_indices"):
+            del self._nonzero_indices
 
     def collate_image_dataset_batch(self, batch: Dict, num_rays_per_batch: int, keep_full_image: bool = False):
         """

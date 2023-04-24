@@ -195,7 +195,6 @@ class TensoRFField(Field):
         tl, br = (xyz_min - old_aabb_min)/unit_size, (old_aabb_max-xyz_max)/unit_size
         tl, br = torch.floor(tl), torch.floor(br)
         tl, br = tl.to(dtype=int), br.to(dtype=int)
-        print(f"tl: {tl}, br: {br}")
 
         self.color_encoding.shrink_grid(tl, br)
         self.density_encoding.shrink_grid(tl, br)
@@ -215,7 +214,7 @@ class TensoRFField(Field):
         voxel_size = ((xyz_max - xyz_min).prod() / n_voxels).pow(1 / dim)
         true_resolution = ((xyz_max - xyz_min) / voxel_size).to(dtype=int)
 
-        print(f"true resolution: {true_resolution}")
+        print(f"========> upsampled resolution: {true_resolution}")
 
         self.color_encoding.upsample_grid(true_resolution)
         self.density_encoding.upsample_grid(true_resolution)

@@ -99,6 +99,7 @@ for dataset in "${DATASETS[@]}"; do
              --pipeline.model.yzf_mode2=True \
              --pipeline.model.render_step_size=0.005 \
              --pipeline.model.shrinking=True \
+             --pipeline.model.filtering=True \
              ${dataparser} & GPU_PID[$idx]=$!
     echo "Launched ${method_name} ${dataset} on gpu ${GPU_IDX[$idx]}, ${tag}"
     

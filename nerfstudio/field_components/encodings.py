@@ -567,7 +567,7 @@ class TensorVMSplitEncoding(Encoding):
             app_mode = self.app_modes[idx_plane]
             self.plane_coef[idx_plane] = torch.nn.Parameter(
                 F.interpolate(
-                    self.plane_coef[idx_plane].data, size=(resolution[vec_mode0], resolution[vec_mode1]), mode="bilinear", align_corners=True
+                    self.plane_coef[idx_plane].data, size=(resolution[vec_mode1], resolution[vec_mode0]), mode="bilinear", align_corners=True
                 )
             )
             self.line_coef[idx_plane] = torch.nn.Parameter(
@@ -587,12 +587,13 @@ class TensorVMSplitEncoding(Encoding):
             app_mode = self.app_modes[idx_plane]
 
             self.plane_coef[idx_plane] = torch.nn.Parameter(
-                self.plane_coef[idx_plane].data[..., tl[vec_mode0]:self.plane_coef[idx_plane].shape[-2]-br[vec_mode0], tl[vec_mode1]:self.plane_coef[idx_plane].shape[-1]-br[vec_mode1]]
+                self.plane_coef[idx_plane].data[..., tl[vec_mode1]:self.plane_coef[idx_plane].shape[-2]-br[vec_mode1], tl[vec_mode0]:self.plane_coef[idx_plane].shape[-1]-br[vec_mode0]]
             )
             self.line_coef[idx_plane] = torch.nn.Parameter(
                 self.line_coef[idx_plane].data[..., tl[app_mode]:self.line_coef[idx_plane].shape[-2]-br[app_mode],:]
             )
 
+            print(f"shrinked shape of group {idx_plane}: {self.plane_coef[idx_plane].shape}, {self.line_coef[idx_plane].shape}")
 
 
 class TriplaneEncoding(Encoding):

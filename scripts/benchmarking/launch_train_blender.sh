@@ -97,7 +97,6 @@ for dataset in "${DATASETS[@]}"; do
              --timestamp "$timestamp" \
              --pipeline.datamanager.camera-optimizer.mode off \
              --pipeline.model.yzf_mode2=True \
-             --pipeline.model.render_step_size=0.005 \
              --pipeline.model.shrinking=True \
              --pipeline.model.filtering=True \
              ${dataparser} & GPU_PID[$idx]=$!

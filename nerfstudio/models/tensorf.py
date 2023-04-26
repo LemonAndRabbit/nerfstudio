@@ -73,8 +73,9 @@ class TensoRFModelConfig(ModelConfig):
     final_resolution: int = 300
     """final render resolution"""
     upsampling_iters: Tuple[int, ...] = (2000, 3000, 4000, 5500, 7000)
+    # upsampling_iters: Tuple[int, ...] = ()
     """specifies a list of iteration step numbers to perform upsampling"""
-    loss_coefficients: Dict[str, float] = to_immutable_dict({"rgb_loss": 1.0})
+    loss_coefficients: Dict[str, float] = to_immutable_dict({"rgb_loss": 1.0, "l1_loss": 8e-5})
     """Loss specific weights."""
     num_samples: int = 50
     """Number of samples in field evaluation"""
@@ -92,23 +93,32 @@ class TensoRFModelConfig(ModelConfig):
     """yzf mode where use uniform sampler"""
     yzf_mode2: bool = False
     """yzf mode where use occupancy sampler"""
-    render_step_size: float = 0.01
+    step_ratio: float = 0.5
     """Minimum step size for rendering, only used in yzf_mode2"""
 
     enable_single_jitter: bool = True
     """enable single jitter"""
-    density_activation: str = 'softplus',
+    density_activation: str = 'softplus'
     """density activation"""
 
     shrinking: bool = False
     """enable shrinking from occupancy grid"""
-    shrinking_iters: Tuple[int, ...] = (2000, 4000)
+    shrinking_iters: Tuple[int, ...] = (2000,)
+    # shrinking_iters: Tuple[int, ...] = ()
     """specifies a list of iteration step numbers to perform shrinking"""
 
     filtering: bool = False
     """enable filtering"""
-    filtering_iters: Tuple[int, ...] = (0, 2000, 4000)
+    filtering_iters: Tuple[int, ...] = (4000,)
     """specifies a list of iteration step numbers to perform filtering"""
+
+    use_alpha_mask: bool = True
+    """use alpha mask"""
+    update_alpha_mask_iters: Tuple[int, ...] = (2000, 4000)
+    """specifies a list of iteration step numbers to update alpha mask"""
+    # record_alpha_iters: Tuple[int, ...] = (0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000)
+    record_alpha_iters: Tuple[int, ...] = ()
+    """specifies a list of iteration step numbers to record alpha mask"""
 
 
 
@@ -146,26 +156,28 @@ class TensoRFModel(Model):
         )
         self.yzf_mode = config.yzf_mode
         self.yzf_mode2 = config.yzf_mode2
+        self.step_ratio = config.step_ratio
         self.shrinking = config.shrinking
         self.shrinking_iters = config.shrinking_iters
         self.filtering = config.filtering
         self.filtering_iters = config.filtering_iters
+        self.use_alpha_mask = config.use_alpha_mask
 
         assert self.yzf_mode2 or not self.shrinking, "Must enable occupancy_grid to enable shrinking"
-        assert not self.shrinking or set(self.shrinking_iters) <= set(self.upsampling_iters), \
-            "Shrinking iterations must be a subset of upsampling iterations"
+        # assert not self.shrinking or set(self.shrinking_iters) <= set(self.upsampling_iters), \
+        #     "Shrinking iterations must be a subset of upsampling iterations"
         assert self.shrinking or not self.filtering, "Must enable shrinking to enable filtering"
         nonzero_filtering_iters = set(self.filtering_iters)
         nonzero_filtering_iters.discard(0)
-        assert not self.filtering or nonzero_filtering_iters <= set(self.shrinking_iters), \
-            "Filtering iteration must be a subset of shrinking iterations"
+        # assert not self.filtering or nonzero_filtering_iters <= set(self.shrinking_iters), \
+        #     "Filtering iteration must be a subset of shrinking iterations"
         super().__init__(config=config, **kwargs)
 
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
         # the callback that we want to run every X iterations after the training iteration
-        def reinitialize_optimizer(
+        def upsample_grids(
             self, training_callback_attributes: TrainingCallbackAttributes, step: int  # pylint: disable=unused-argument
         ):
             index = self.upsampling_iters.index(step)
@@ -192,17 +204,18 @@ class TensoRFModel(Model):
                         optimizer=training_callback_attributes.optimizers.optimizers["encodings"], lr_init=lr_init
                     )
                 )
+            self.update_sampling_step_size()
 
         def update_occupancy_grid(step: int):
             # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
             # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
             self.occupancy_grid.every_n_step(
                 step=step,
-                occ_eval_fn=lambda x: self.field.get_opacity(x, self.config.render_step_size),
+                occ_eval_fn=lambda x: self.field.get_opacity(x, self.step_size),
             )
 
-        def shrink_tensorf_grids(self, step: int):
-            print('========> shrinking grids ...')
+        def update_alpha_mask(self, step:int):
+            print('========> updating alpha mask ...')
             cur_reso = self.field.color_encoding.resolution
             aabb = self.field.aabb
 
@@ -215,26 +228,66 @@ class TensoRFModel(Model):
 
             xyzs = xyzs * (aabb[1] - aabb[0]) + aabb[0]
 
-            step_size = ((aabb[1] - aabb[0]) / cur_reso).mean()*0.5/25
-            alpha = self.field.get_opacity(xyzs, step_size).squeeze(-1)
+            alpha = self.field.get_opacity(xyzs, 1).squeeze(-1)
+            alpha = 1 - torch.exp(-alpha*self.step_size)
 
             xyzs = xyzs.transpose(0,2).contiguous()
             alpha = alpha.clamp(0,1).transpose(0,2).contiguous()[None,None]
 
-            alpha = 1 - torch.exp(-alpha)
 
             ks = 3
             alpha = F.max_pool3d(alpha, kernel_size=ks, padding=ks // 2, stride=1).view((cur_reso[2], cur_reso[1], cur_reso[0]))
-            alpha[alpha>=0.005] = 1
-            alpha[alpha<0.005] = 0
+            alpha[alpha>=0.001] = 1
+            alpha[alpha<0.001] = 0
 
             valid_xyzs = xyzs[alpha>0.5]
             new_aabb = torch.cat([valid_xyzs.amin(0), valid_xyzs.amax(0)]).view((2,3))
 
-            new_aabb = self.field.shrink_grid(new_aabb)
-            self.sampler.scene_aabb = new_aabb.flatten()
+            self.occupancy_grid._binary = alpha.transpose(0,2).to(device=self.occupancy_grid._binary.device, dtype=torch.bool)
+            self.occupancy_grid._roi_aabb = aabb.flatten().clone()
 
+
+            print(f"  Alpha mask ratio: {alpha.mean()}")
+
+            self.occupied_aabb = new_aabb
+
+        # def record_alpha(self, step=int):
+        #     print('========> recording alpha mask ...')
+        #     cur_reso = self.field.color_encoding.resolution
+        #     aabb = self.field.aabb
+
+        #     xyzs = torch.stack(torch.meshgrid(
+        #         torch.linspace(0, 1, cur_reso[0].item()),
+        #         torch.linspace(0, 1, cur_reso[1].item()),
+        #         torch.linspace(0, 1, cur_reso[2].item()),
+        #         indexing = 'ij'
+        #     ), -1).to(aabb.device)
+
+        #     xyzs = xyzs * (aabb[1] - aabb[0]) + aabb[0]
+
+        #     sigma = self.field.get_opacity(xyzs, 1).squeeze(-1)
+        #     alpha = 1 - torch.exp(-sigma*self.step_size)
+
+
+        #     torch.save(sigma, f'sigma_step{step}.pt')
+        #     torch.save(alpha, f'alpha_step{step}.pt')
+
+        #     if step==5000:
+        #         exit()
+
+        def shrink_tensorf_grids(self, step: int):
+            print('========> shrinking grids ...')
+
+            target_aabb = self.occupied_aabb
+
+            new_aabb = self.field.shrink_grid(target_aabb)
+            self.sampler.scene_aabb = new_aabb.flatten()
+            print(f"  Occupancy grid safety check:{self.occupancy_grid._roi_aabb}")
             print(f"  New aabb: {self.sampler.scene_aabb}")
+
+            # self.update_sampling_step_size()
+            # print(f"  sampling size updated to {self.step_size}")
+
 
         def filter_training_rays(self, training_callback_attributes: TrainingCallbackAttributes, step: int):
 
@@ -286,6 +339,16 @@ class TensoRFModel(Model):
 
         callbacks = []
 
+        if self.config.update_alpha_mask_iters is not None:
+            callbacks.append(
+                TrainingCallback(
+                    where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                    iters=self.config.update_alpha_mask_iters,
+                    func=update_alpha_mask,
+                    args=[self,],
+                )
+            )
+
         if self.shrinking:
             # shrinking grid size should be done before the upsampling and optimizer reinitialization
             callbacks.append(
@@ -311,12 +374,12 @@ class TensoRFModel(Model):
             TrainingCallback(
                 where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
                 iters=self.upsampling_iters,
-                func=reinitialize_optimizer,
+                func=upsample_grids,
                 args=[self, training_callback_attributes],
             )
         )
 
-        if self.yzf_mode2:
+        if self.yzf_mode2 and not self.use_alpha_mask:
             callbacks.append(
                 TrainingCallback(
                     where_to_run=[TrainingCallbackLocation.BEFORE_TRAIN_ITERATION],
@@ -325,6 +388,18 @@ class TensoRFModel(Model):
                 )
             )
         return callbacks
+
+    def update_sampling_step_size(self) -> float:
+        """Update the sampling step size like TensoRF"""
+        aabb = self.sampler.scene_aabb
+        print(f"  detected aabb: {aabb}")
+        aabb_size = aabb[3:] - aabb[:3]
+        grid_size = self.field.color_encoding.resolution.to(aabb.device)
+        print(f"  detected grid size: {grid_size}")
+        units = aabb_size / (grid_size - 1)
+        self.step_size = units.mean() * self.step_ratio
+        print(f"  sampling size updated to {self.step_size}")
+        return self.step_size
 
     def update_to_step(self, step: int, state_dict) -> None:
         if step < self.upsampling_iters[0]:
@@ -340,7 +415,11 @@ class TensoRFModel(Model):
             self.field.aabb[:] = state_dict['_model.field.aabb']
             self.sampler.scene_aabb[:] = state_dict['_model.field.aabb'].flatten()
 
+        if '_model.occupancy_grid._binary' in state_dict:
+            self.occupancy_grid._binary = state_dict['_model.occupancy_grid._binary'].clone().to(self.device)
+
         self.field.upsample_grid(new_grid_resolution)  # type: ignore
+        self.update_sampling_step_size()
 
     def populate_modules(self):
         """Set the fields and modules"""
@@ -413,6 +492,9 @@ class TensoRFModel(Model):
                 occupancy_grid=self.occupancy_grid,
                 density_fn=self.field.density_fn,
             )
+
+            self.update_sampling_step_size()
+
         else:
             self.sampler_uniform = UniformSampler(num_samples=self.config.num_uniform_samples, single_jitter=True)
             self.sampler_pdf = PDFSampler(num_samples=self.config.num_samples, single_jitter=self.config.enable_single_jitter, include_original=False)
@@ -490,26 +572,25 @@ class TensoRFModel(Model):
                 ray_bundle=ray_bundle,
                 near_plane=2,
                 far_plane=6,
-                render_step_size=self.config.render_step_size,
+                render_step_size=self.step_size,
                 cone_angle=0)
         
         field_outputs = self.field(ray_samples)
+
+        # torch.save(ray_samples, "ray_samples.pt")
+        # torch.save(ray_indices, "ray_indices.pt")
+        # exit()
 
         # accumulation
         packed_info = nerfacc.pack_info(ray_indices, num_rays)
         weights = nerfacc.render_weight_from_density(
             packed_info=packed_info,
             sigmas=field_outputs[FieldHeadNames.DENSITY],
-            t_starts=ray_samples.frustums.starts,
-            t_ends=ray_samples.frustums.ends,
+            t_starts=ray_samples.frustums.starts * 25,
+            t_ends=ray_samples.frustums.ends * 25,
         )
 
-        rgb = self.renderer_rgb(
-            rgb=field_outputs[FieldHeadNames.RGB],
-            weights=weights,
-            ray_indices=ray_indices,
-            num_rays=num_rays,
-        )
+        weights = ((weights > 0.0001) * weights - weights).detach() + weights
 
         rgb = self.renderer_rgb(
             rgb=field_outputs[FieldHeadNames.RGB],
@@ -564,7 +645,7 @@ class TensoRFModel(Model):
 
         rgb_loss = self.rgb_loss(image, outputs["rgb"])
 
-        l1_loss = self.field.l1_loss() * 8e-5
+        l1_loss = self.field.l1_loss()
 
         loss_dict = {"rgb_loss": rgb_loss, "l1_loss": l1_loss}
         loss_dict = misc.scale_dict(loss_dict, self.config.loss_coefficients)

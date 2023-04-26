@@ -84,8 +84,7 @@ class TensoRFField(Field):
             self.B = nn.Linear(in_features=self.color_encoding.get_out_dim(), out_features=appearance_dim, bias=False)
 
         self.field_output_rgb = RGBFieldHead(in_dim=self.mlp_head.get_out_dim(), activation=nn.Sigmoid())
-
-        if not hasattr(self, 'density_actvation') or density_activation == 'relu':
+        if density_activation == 'relu':
             self.density_activation = nn.ReLU()
             self.density_offset = 0
         elif density_activation == 'softplus':
@@ -97,7 +96,7 @@ class TensoRFField(Field):
         positions = positions * 2 - 1
         density = self.density_encoding(positions)
         density_enc = torch.sum(density, dim=-1)[..., None]
-        density_enc = self.density_activation(density_enc + self.density_offset) * 25
+        density_enc = self.density_activation(density_enc + self.density_offset)
         return density_enc, None
 
     def get_outputs(self, ray_samples: RaySamples, density_embedding: Optional[TensorType] = None) -> TensorType:
@@ -195,6 +194,9 @@ class TensoRFField(Field):
         tl, br = (xyz_min - old_aabb_min)/unit_size, (old_aabb_max-xyz_max)/unit_size
         tl, br = torch.floor(tl), torch.floor(br)
         tl, br = tl.to(dtype=int), br.to(dtype=int)
+
+        print(f"unit_size: {unit_size}")
+        print(f"tl: {tl}, br: {br}")
 
         self.color_encoding.shrink_grid(tl, br)
         self.density_encoding.shrink_grid(tl, br)

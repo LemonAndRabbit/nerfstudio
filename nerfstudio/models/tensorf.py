@@ -107,9 +107,9 @@ class TensoRFModelConfig(ModelConfig):
     # shrinking_iters: Tuple[int, ...] = ()
     """specifies a list of iteration step numbers to perform shrinking"""
 
-    filtering: bool = False
+    filtering: bool = True
     """enable filtering"""
-    filtering_iters: Tuple[int, ...] = (4000,)
+    filtering_iters: Tuple[int, ...] = (0, 4000)
     """specifies a list of iteration step numbers to perform filtering"""
 
     use_alpha_mask: bool = True
@@ -167,8 +167,8 @@ class TensoRFModel(Model):
         # assert not self.shrinking or set(self.shrinking_iters) <= set(self.upsampling_iters), \
         #     "Shrinking iterations must be a subset of upsampling iterations"
         assert self.shrinking or not self.filtering, "Must enable shrinking to enable filtering"
-        nonzero_filtering_iters = set(self.filtering_iters)
-        nonzero_filtering_iters.discard(0)
+        # nonzero_filtering_iters = set(self.filtering_iters)
+        # nonzero_filtering_iters.discard(0)
         # assert not self.filtering or nonzero_filtering_iters <= set(self.shrinking_iters), \
         #     "Filtering iteration must be a subset of shrinking iterations"
         super().__init__(config=config, **kwargs)
@@ -315,18 +315,33 @@ class TensoRFModel(Model):
 
             mask_filtered = []
             idx_chunks = torch.split(torch.arange(N), 10240*5)
+
             for idx_chunk in idx_chunks:
-                all_rays = ray_generator(all_ray_indices[idx_chunk])
-                rays_o = all_rays.origins
-                rays_d = all_rays.directions
+                chunk_all_rays = ray_generator(all_ray_indices[idx_chunk])
 
-                vec = torch.where(rays_d == 0, torch.full_like(rays_d, 1e-6), rays_d)
-                rate_a = (scene_aabb[1] - rays_o) / vec
-                rate_b = (scene_aabb[0] - rays_o) / vec
+                if step == 0:
 
-                t_min = torch.minimum(rate_a, rate_b).amax(-1)
-                t_max = torch.maximum(rate_a, rate_b).amin(-1)
-                mask_inbbox = t_max > t_min
+                    rays_o = chunk_all_rays.origins
+                    rays_d = chunk_all_rays.directions
+
+                    vec = torch.where(rays_d == 0, torch.full_like(rays_d, 1e-6), rays_d)
+                    rate_a = (scene_aabb[1] - rays_o) / vec
+                    rate_b = (scene_aabb[0] - rays_o) / vec
+
+                    t_min = torch.minimum(rate_a, rate_b).amax(-1)
+                    t_max = torch.maximum(rate_a, rate_b).amin(-1)
+                    mask_inbbox = t_max > t_min
+
+                
+                else:
+                    _, chunk_ray_indices = self.sampler(ray_bundle=chunk_all_rays,
+                        near_plane=2,
+                        far_plane=6,
+                        render_step_size=self.step_size,
+                        cone_angle=0)
+
+                    mask_inbbox = torch.zeros(chunk_all_rays.origins.shape[0], dtype=torch.bool)
+                    mask_inbbox[chunk_ray_indices.unique()] = True
 
                 mask_filtered.append(mask_inbbox.cpu())
 
@@ -360,15 +375,14 @@ class TensoRFModel(Model):
                 )
             )
 
-        if self.filtering:
-            callbacks.append( # after the shrinking
-                TrainingCallback(
-                    where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
-                    iters=self.filtering_iters,
-                    func=filter_training_rays,
-                    args=[self,training_callback_attributes],
-                )
+        callbacks.append( # after the shrinking
+            TrainingCallback(
+                where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                iters=self.filtering_iters,
+                func=filter_training_rays,
+                args=[self,training_callback_attributes],
             )
+        )
 
         callbacks.append(
             TrainingCallback(

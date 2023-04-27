@@ -79,6 +79,8 @@ if [ "$method_name" = "instant-ngp-bounded" ]; then
 fi
 
 for dataset in "${DATASETS[@]}"; do
+    output_dir="outputs/blender_${dataset}_${tag}_${subfix}/${method_name}/${timestamp}/"
+    mkdir -p "${output_dir}"
     if "$single" && [ -n "${GPU_PID[$idx]+x}" ]; then
         echo "Waiting for GPU ${GPU_IDX[$idx]}"
         wait "${GPU_PID[$idx]}"
@@ -99,7 +101,7 @@ for dataset in "${DATASETS[@]}"; do
              --pipeline.model.yzf_mode2=True \
              --pipeline.model.shrinking=True \
              --pipeline.model.filtering=True \
-             ${dataparser} & GPU_PID[$idx]=$!
+             ${dataparser} | tee ${output_dir}/log.txt & GPU_PID[$idx]=$!
     echo "Launched ${method_name} ${dataset} on gpu ${GPU_IDX[$idx]}, ${tag}"
     
     # update gpu

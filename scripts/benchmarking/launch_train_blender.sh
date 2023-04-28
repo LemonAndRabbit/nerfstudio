@@ -61,7 +61,6 @@ fi
 echo "available gpus... ${GPU_IDX[*]}"
 
 DATASETS=("lego" "ficus" "chair" "mic" "hotdog" "materials" "drums" "ship" )
-# DATASETS=("lego")
 date
 tag=$(date +'%Y-%m-%d')
 idx=0

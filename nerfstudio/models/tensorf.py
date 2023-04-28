@@ -206,6 +206,7 @@ class TensoRFModel(Model):
                 )
             self.update_sampling_step_size()
 
+        @torch.no_grad()
         def update_occupancy_grid(step: int):
             # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
             # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
@@ -214,6 +215,7 @@ class TensoRFModel(Model):
                 occ_eval_fn=lambda x: self.field.get_opacity(x, self.step_size),
             )
 
+        @torch.no_grad()
         def update_alpha_mask(self, step:int):
             print('========> updating alpha mask ...')
             cur_reso = self.field.color_encoding.resolution
@@ -228,22 +230,33 @@ class TensoRFModel(Model):
 
             xyzs = xyzs * (aabb[1] - aabb[0]) + aabb[0]
 
+
+            if step > self.config.update_alpha_mask_iters[0]:
+                xyz_in_occupancy = (xyzs - self.occupancy_grid._roi_aabb[:3]) / (self.occupancy_grid._roi_aabb[3:] - self.occupancy_grid._roi_aabb[:3]) 
+                xyz_in_occupancy = xyz_in_occupancy * 2 - 1
+                alpha_mask = torch.zeros((cur_reso[0], cur_reso[1], cur_reso[2]), dtype=torch.bool, device=xyzs.device)
+                for i in range(cur_reso[0].item()):
+                    sampled_alpha = F.grid_sample(self.occupancy_grid._binary.transpose(0,2)[None, None, ...].float(), xyz_in_occupancy[i].view(1,-1,1,1,3), align_corners=True).view(-1)
+                    alpha_mask[i] = sampled_alpha.view(cur_reso[1], cur_reso[2]) > 0
+            else:
+                alpha_mask = torch.ones((cur_reso[0], cur_reso[1], cur_reso[2]), dtype=torch.bool, device=xyzs.device)
+
             alpha = self.field.get_opacity(xyzs, 1).squeeze(-1)
             alpha = 1 - torch.exp(-alpha*self.step_size)
 
-            xyzs = xyzs.transpose(0,2).contiguous()
-            alpha = alpha.clamp(0,1).transpose(0,2).contiguous()[None,None]
-
+            alpha = alpha.clamp(0,1).contiguous()[None,None]
 
             ks = 3
-            alpha = F.max_pool3d(alpha, kernel_size=ks, padding=ks // 2, stride=1).view((cur_reso[2], cur_reso[1], cur_reso[0]))
+            alpha = F.max_pool3d(alpha, kernel_size=ks, padding=ks // 2, stride=1).view((cur_reso[0], cur_reso[1], cur_reso[2]))
             alpha[alpha>=0.001] = 1
             alpha[alpha<0.001] = 0
+
+            alpha = alpha * alpha_mask
 
             valid_xyzs = xyzs[alpha>0.5]
             new_aabb = torch.cat([valid_xyzs.amin(0), valid_xyzs.amax(0)]).view((2,3))
 
-            self.occupancy_grid._binary = alpha.transpose(0,2).to(device=self.occupancy_grid._binary.device, dtype=torch.bool)
+            self.occupancy_grid._binary = alpha.to(device=self.occupancy_grid._binary.device, dtype=torch.bool)
             self.occupancy_grid._roi_aabb = aabb.flatten().clone()
 
 
@@ -274,7 +287,8 @@ class TensoRFModel(Model):
 
         #     if step==5000:
         #         exit()
-
+        
+        @torch.no_grad()
         def shrink_tensorf_grids(self, step: int):
             print('========> shrinking grids ...')
 
@@ -289,6 +303,7 @@ class TensoRFModel(Model):
             # print(f"  sampling size updated to {self.step_size}")
 
 
+        @torch.no_grad()
         def filter_training_rays(self, training_callback_attributes: TrainingCallbackAttributes, step: int):
 
             print('========> filtering rays ...')

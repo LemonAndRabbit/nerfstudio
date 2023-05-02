@@ -27,6 +27,7 @@ from nerfstudio.utils.math import masked_reduction, normalized_depth_scale_and_s
 
 L1Loss = nn.L1Loss
 MSELoss = nn.MSELoss
+SmoothL1Loss = nn.SmoothL1Loss
 
 LOSSES = {"L1": L1Loss, "MSE": MSELoss}
 

@@ -15,6 +15,7 @@ helpFunction_launch_eval()
 }
 
 single=false
+subfix=""
 while getopts "m:o:t:n:s" opt; do
     case "$opt" in
         m ) method_name="$OPTARG" ;;

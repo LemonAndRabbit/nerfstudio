@@ -78,6 +78,18 @@ if [ "$method_name" = "instant-ngp-bounded" ]; then
     trans_file="/transforms_train.json"
 fi
 
+# if [ "$method_name" = "instant-ngp-zhifan" ]; then
+#     dataparser=""
+#     trans_file="/transforms_train.json"
+# fi
+
+app_args=""
+if [ "$method_name" = "tensorf" ]; then
+    app_args="--pipeline.model.yzf_mode2=True \
+             --pipeline.model.shrinking=True \
+             --pipeline.model.filtering=True"
+fi
+
 for dataset in "${DATASETS[@]}"; do
     if "$single" && [ -n "${GPU_PID[$idx]+x}" ]; then
         echo "Waiting for GPU ${GPU_IDX[$idx]}"
@@ -96,9 +108,7 @@ for dataset in "${DATASETS[@]}"; do
              --vis "${vis}" \
              --timestamp "$timestamp" \
              --pipeline.datamanager.camera-optimizer.mode off \
-             --pipeline.model.yzf_mode2=True \
-             --pipeline.model.shrinking=True \
-             --pipeline.model.filtering=True \
+             ${app_args} \
              ${dataparser} & GPU_PID[$idx]=$!
     echo "Launched ${method_name} ${dataset} on gpu ${GPU_IDX[$idx]}, ${tag}"
     

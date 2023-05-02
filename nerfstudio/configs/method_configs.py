@@ -45,6 +45,7 @@ from nerfstudio.engine.optimizers import AdamOptimizerConfig, RAdamOptimizerConf
 from nerfstudio.engine.schedulers import (
     CosineDecaySchedulerConfig,
     ExponentialDecaySchedulerConfig,
+    INGPSchedulerConfig,
 )
 from nerfstudio.engine.trainer import TrainerConfig
 from nerfstudio.field_components.temporal_distortions import TemporalDistortionKind
@@ -227,6 +228,36 @@ method_configs["instant-ngp-bounded"] = TrainerConfig(
         "fields": {
             "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
             "scheduler": None,
+        }
+    },
+    viewer=ViewerConfig(num_rays_per_chunk=64000),
+    vis="viewer",
+)
+
+method_configs["instant-ngp-zhifan"] = TrainerConfig(
+    method_name="instant-ngp-zhifan",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=20000,
+    mixed_precision=False,
+    scale_gradients=True,
+    init_grad_scale=2.**10,
+    pipeline=DynamicBatchPipelineConfig(
+        datamanager=VanillaDataManagerConfig(dataparser=InstantNGPDataParserConfig(), train_num_rays_per_batch=8192),
+        model=InstantNGPModelConfig(
+            eval_num_rays_per_chunk=8192,
+            contraction_type=ContractionType.AABB,
+            cone_angle=0.0,
+            render_step_size=0.005,
+            near_plane=None,
+            far_plane=None,
+            background_color="white",
+        ),
+    ),
+    optimizers={
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, betas=[0.9,0.999]),
+            "scheduler": INGPSchedulerConfig(max_steps=20000),
         }
     },
     viewer=ViewerConfig(num_rays_per_chunk=64000),

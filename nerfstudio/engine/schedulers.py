@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import Optional, Type
 
 import numpy as np
+import torch
 from torch.optim import Optimizer, lr_scheduler
 from typing_extensions import Literal
 
@@ -140,3 +141,30 @@ class CosineDecayScheduler(Scheduler):
 
         scheduler = lr_scheduler.LambdaLR(optimizer, lr_lambda=func)
         return scheduler
+
+@dataclass
+class INGPSchedulerConfig(SchedulerConfig):
+    """INGP Scheduler from Nerfacc"""
+
+    _target: Type = field(default_factory=lambda: INGPScheduler)
+    """target class to instantiate"""
+    max_steps: int = 35000
+    """The maximum number of steps."""
+
+
+class INGPScheduler(Scheduler):
+    """Returns and Instant-NGP Scheduler"""
+
+    config: INGPSchedulerConfig
+
+    def get_scheduler(self, optimizer: Optimizer, lr_init: float) -> lr_scheduler._LRScheduler:
+        
+        return torch.optim.lr_scheduler.MultiStepLR(
+                    optimizer,
+                    milestones=[
+                        self.config.max_steps // 2,
+                        self.config.max_steps * 3 // 4,
+                        self.config.max_steps * 9 // 10,
+                    ],
+                    gamma=0.33,
+                )

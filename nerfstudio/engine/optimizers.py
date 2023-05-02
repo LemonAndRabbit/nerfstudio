@@ -59,7 +59,7 @@ class AdamOptimizerConfig(OptimizerConfig):
     _target: Type = torch.optim.Adam
     weight_decay: float = 0
     """The weight decay to use."""
-    betas = [0.9, 0.99]
+    betas: List[int] = (0.9, 0.99)
 
 
 @dataclass

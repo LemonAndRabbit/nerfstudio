@@ -68,7 +68,7 @@ class TrainerConfig(ExperimentConfig):
     """Number of steps between randomly sampled batches of rays."""
     steps_per_eval_image: int = 500
     """Number of steps between single eval images."""
-    steps_per_eval_all_images: int = 29999
+    steps_per_eval_all_images: int = 19999
     """Number of steps between eval all images."""
     max_num_iterations: int = 1000000
     """Maximum number of iterations to run."""
@@ -85,6 +85,10 @@ class TrainerConfig(ExperimentConfig):
     """Path to config YAML file."""
     log_gradients: bool = False
     """Optionally log gradients during training"""
+    # grad scaler
+    scale_gradients: bool = False
+    """Whether to scale gradients."""
+    init_grad_scale: Optional[float] = None
 
 
 class Trainer:
@@ -120,7 +124,8 @@ class Trainer:
             CONSOLE.print("Mixed precision is disabled for CPU training.")
         self._start_step: int = 0
         # optimizers
-        self.grad_scaler = GradScaler(enabled=self.mixed_precision)
+        self.grad_scaler = GradScaler(init_scale=2**16 if self.config.init_grad_scale is None else self.config.init_grad_scale,
+                                      enabled=self.mixed_precision or self.config.scale_gradients)
 
         self.base_dir: Path = config.get_base_dir()
         # directory to save checkpoints
@@ -444,7 +449,6 @@ class Trainer:
                 writer.put_image(name=group + "/" + image_name, image=image, step=step)
 
         # all eval images
-        # if step_check(step, self.config.steps_per_eval_all_images):
-        if step in [25000, 29999]:
+        if step_check(step, self.config.steps_per_eval_all_images):
             metrics_dict = self.pipeline.get_average_eval_image_metrics(step=step)
             writer.put_dict(name="Eval Images Metrics Dict (all images)", scalar_dict=metrics_dict, step=step)

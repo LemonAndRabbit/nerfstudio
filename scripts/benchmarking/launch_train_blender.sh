@@ -16,7 +16,7 @@ helpFunction_launch_train()
 
 vis="tensorboard"
 single=false
-epochs=30000
+epochs=35000
 subfix=""
 while getopts "m:v:e:n:s" opt; do
     case "$opt" in
@@ -61,7 +61,6 @@ fi
 echo "available gpus... ${GPU_IDX[*]}"
 
 DATASETS=("lego" "ficus" "chair" "mic" "hotdog" "materials" "drums" "ship" )
-# DATASETS=("lego")
 date
 tag=$(date +'%Y-%m-%d')
 idx=0
@@ -91,6 +90,8 @@ if [ "$method_name" = "tensorf" ]; then
 fi
 
 for dataset in "${DATASETS[@]}"; do
+    output_dir="outputs/blender_${dataset}_${tag}_${subfix}/${method_name}/${timestamp}/"
+    mkdir -p "${output_dir}"
     if "$single" && [ -n "${GPU_PID[$idx]+x}" ]; then
         echo "Waiting for GPU ${GPU_IDX[$idx]}"
         wait "${GPU_PID[$idx]}"

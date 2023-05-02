@@ -107,9 +107,9 @@ class TensoRFModelConfig(ModelConfig):
     # shrinking_iters: Tuple[int, ...] = ()
     """specifies a list of iteration step numbers to perform shrinking"""
 
-    filtering: bool = False
+    filtering: bool = True
     """enable filtering"""
-    filtering_iters: Tuple[int, ...] = (4000,)
+    filtering_iters: Tuple[int, ...] = (0, 4000)
     """specifies a list of iteration step numbers to perform filtering"""
 
     use_alpha_mask: bool = True
@@ -167,8 +167,8 @@ class TensoRFModel(Model):
         # assert not self.shrinking or set(self.shrinking_iters) <= set(self.upsampling_iters), \
         #     "Shrinking iterations must be a subset of upsampling iterations"
         assert self.shrinking or not self.filtering, "Must enable shrinking to enable filtering"
-        nonzero_filtering_iters = set(self.filtering_iters)
-        nonzero_filtering_iters.discard(0)
+        # nonzero_filtering_iters = set(self.filtering_iters)
+        # nonzero_filtering_iters.discard(0)
         # assert not self.filtering or nonzero_filtering_iters <= set(self.shrinking_iters), \
         #     "Filtering iteration must be a subset of shrinking iterations"
         super().__init__(config=config, **kwargs)
@@ -206,6 +206,7 @@ class TensoRFModel(Model):
                 )
             self.update_sampling_step_size()
 
+        @torch.no_grad()
         def update_occupancy_grid(step: int):
             # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
             # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
@@ -214,6 +215,7 @@ class TensoRFModel(Model):
                 occ_eval_fn=lambda x: self.field.get_opacity(x, self.step_size),
             )
 
+        @torch.no_grad()
         def update_alpha_mask(self, step:int):
             print('========> updating alpha mask ...')
             cur_reso = self.field.color_encoding.resolution
@@ -228,22 +230,33 @@ class TensoRFModel(Model):
 
             xyzs = xyzs * (aabb[1] - aabb[0]) + aabb[0]
 
+
+            if step > self.config.update_alpha_mask_iters[0]:
+                xyz_in_occupancy = (xyzs - self.occupancy_grid._roi_aabb[:3]) / (self.occupancy_grid._roi_aabb[3:] - self.occupancy_grid._roi_aabb[:3]) 
+                xyz_in_occupancy = xyz_in_occupancy * 2 - 1
+                alpha_mask = torch.zeros((cur_reso[0], cur_reso[1], cur_reso[2]), dtype=torch.bool, device=xyzs.device)
+                for i in range(cur_reso[0].item()):
+                    sampled_alpha = F.grid_sample(self.occupancy_grid._binary.transpose(0,2)[None, None, ...].float(), xyz_in_occupancy[i].view(1,-1,1,1,3), align_corners=True).view(-1)
+                    alpha_mask[i] = sampled_alpha.view(cur_reso[1], cur_reso[2]) > 0
+            else:
+                alpha_mask = torch.ones((cur_reso[0], cur_reso[1], cur_reso[2]), dtype=torch.bool, device=xyzs.device)
+
             alpha = self.field.get_opacity(xyzs, 1).squeeze(-1)
             alpha = 1 - torch.exp(-alpha*self.step_size)
 
-            xyzs = xyzs.transpose(0,2).contiguous()
-            alpha = alpha.clamp(0,1).transpose(0,2).contiguous()[None,None]
-
+            alpha = alpha.clamp(0,1).contiguous()[None,None]
 
             ks = 3
-            alpha = F.max_pool3d(alpha, kernel_size=ks, padding=ks // 2, stride=1).view((cur_reso[2], cur_reso[1], cur_reso[0]))
+            alpha = F.max_pool3d(alpha, kernel_size=ks, padding=ks // 2, stride=1).view((cur_reso[0], cur_reso[1], cur_reso[2]))
             alpha[alpha>=0.001] = 1
             alpha[alpha<0.001] = 0
+
+            alpha = alpha * alpha_mask
 
             valid_xyzs = xyzs[alpha>0.5]
             new_aabb = torch.cat([valid_xyzs.amin(0), valid_xyzs.amax(0)]).view((2,3))
 
-            self.occupancy_grid._binary = alpha.transpose(0,2).to(device=self.occupancy_grid._binary.device, dtype=torch.bool)
+            self.occupancy_grid._binary = alpha.to(device=self.occupancy_grid._binary.device, dtype=torch.bool)
             self.occupancy_grid._roi_aabb = aabb.flatten().clone()
 
 
@@ -274,7 +287,8 @@ class TensoRFModel(Model):
 
         #     if step==5000:
         #         exit()
-
+        
+        @torch.no_grad()
         def shrink_tensorf_grids(self, step: int):
             print('========> shrinking grids ...')
 
@@ -289,6 +303,7 @@ class TensoRFModel(Model):
             # print(f"  sampling size updated to {self.step_size}")
 
 
+        @torch.no_grad()
         def filter_training_rays(self, training_callback_attributes: TrainingCallbackAttributes, step: int):
 
             print('========> filtering rays ...')
@@ -315,18 +330,33 @@ class TensoRFModel(Model):
 
             mask_filtered = []
             idx_chunks = torch.split(torch.arange(N), 10240*5)
+
             for idx_chunk in idx_chunks:
-                all_rays = ray_generator(all_ray_indices[idx_chunk])
-                rays_o = all_rays.origins
-                rays_d = all_rays.directions
+                chunk_all_rays = ray_generator(all_ray_indices[idx_chunk])
 
-                vec = torch.where(rays_d == 0, torch.full_like(rays_d, 1e-6), rays_d)
-                rate_a = (scene_aabb[1] - rays_o) / vec
-                rate_b = (scene_aabb[0] - rays_o) / vec
+                if step == 0:
 
-                t_min = torch.minimum(rate_a, rate_b).amax(-1)
-                t_max = torch.maximum(rate_a, rate_b).amin(-1)
-                mask_inbbox = t_max > t_min
+                    rays_o = chunk_all_rays.origins
+                    rays_d = chunk_all_rays.directions
+
+                    vec = torch.where(rays_d == 0, torch.full_like(rays_d, 1e-6), rays_d)
+                    rate_a = (scene_aabb[1] - rays_o) / vec
+                    rate_b = (scene_aabb[0] - rays_o) / vec
+
+                    t_min = torch.minimum(rate_a, rate_b).amax(-1)
+                    t_max = torch.maximum(rate_a, rate_b).amin(-1)
+                    mask_inbbox = t_max > t_min
+
+                
+                else:
+                    _, chunk_ray_indices = self.sampler(ray_bundle=chunk_all_rays,
+                        near_plane=2,
+                        far_plane=6,
+                        render_step_size=self.step_size,
+                        cone_angle=0)
+
+                    mask_inbbox = torch.zeros(chunk_all_rays.origins.shape[0], dtype=torch.bool)
+                    mask_inbbox[chunk_ray_indices.unique()] = True
 
                 mask_filtered.append(mask_inbbox.cpu())
 
@@ -360,15 +390,14 @@ class TensoRFModel(Model):
                 )
             )
 
-        if self.filtering:
-            callbacks.append( # after the shrinking
-                TrainingCallback(
-                    where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
-                    iters=self.filtering_iters,
-                    func=filter_training_rays,
-                    args=[self,training_callback_attributes],
-                )
+        callbacks.append( # after the shrinking
+            TrainingCallback(
+                where_to_run=[TrainingCallbackLocation.AFTER_TRAIN_ITERATION],
+                iters=self.filtering_iters,
+                func=filter_training_rays,
+                args=[self,training_callback_attributes],
             )
+        )
 
         callbacks.append(
             TrainingCallback(

@@ -100,6 +100,7 @@ for dataset in "${DATASETS[@]}"; do
              --pipeline.model.yzf_mode2=True \
              --pipeline.model.shrinking=True \
              --pipeline.model.filtering=True \
+             --pipeline.model.inner_mode='ADD' \
              ${dataparser} | tee ${output_dir}/log.txt & GPU_PID[$idx]=$!
     echo "Launched ${method_name} ${dataset} on gpu ${GPU_IDX[$idx]}, ${tag}"
     

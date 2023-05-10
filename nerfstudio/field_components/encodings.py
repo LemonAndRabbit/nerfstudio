@@ -488,19 +488,29 @@ class TensorVMSplitEncoding(Encoding):
 
     vec_modes = [[0,1], [0,2], [1,2]]
     app_modes = [2, 1, 0]
+    agg_mode = 'ADD'
 
     def __init__(
         self,
         resolution: int = 128,
         num_components: int = 24,
         init_scale: float = 0.1,
+        agg_mode='DEFAULT',
+        inner_mode='MUL'
     ) -> None:
         super().__init__(in_dim=3)
 
         self.register_buffer("resolution", torch.Tensor([resolution,]*3).to(dtype=int))
         self.num_components = num_components
+        self.agg_mode = agg_mode
+        self.inner_mode = inner_mode
+
 
         plane_coef, line_coef = [], []
+
+        if self.agg_mode == 'MUL':
+            print("Using agg mode: MUL")
+            init_scale = .7
 
         for _ in range(3):
             plane_coef.append(nn.Parameter(init_scale * torch.randn((1, num_components, resolution, resolution))))
@@ -510,7 +520,10 @@ class TensorVMSplitEncoding(Encoding):
         self.line_coef = nn.ParameterList(line_coef)
 
     def get_out_dim(self) -> int:
-        return self.num_components * 3
+        if self.agg_mode == 'MUL' or self.agg_mode == 'ADD':
+            return self.num_components
+        else:
+            return self.num_components * 3
 
     def forward(self, in_tensor: TensorType["bs":..., "input_dim"]) -> TensorType["bs":..., "output_dim"]:
         """Compute encoding for each position in in_positions
@@ -539,8 +552,19 @@ class TensorVMSplitEncoding(Encoding):
         plane_features = torch.cat(plane_features, dim=0)
         line_features = torch.cat(line_features, dim=0)
 
-        features = plane_features * line_features  # [3, Components, -1, 1]
-        features = torch.moveaxis(features.view(3 * self.num_components, *in_tensor.shape[:-1]), 0, -1)
+        if self.inner_mode == 'MUL':
+            features = plane_features * line_features  # [3, Components, -1, 1]
+        elif self.inner_mode == 'ADD':
+            features = plane_features + line_features
+
+        if self.agg_mode == 'MUL':
+            features = features[0] * features[1] * features[2]
+            features = torch.moveaxis(features.view(self.num_components, *in_tensor.shape[:-1]), 0, -1)
+        elif self.agg_mode == 'ADD':
+            features = torch.sum(features, dim=0)
+            features = torch.moveaxis(features.view(self.num_components, *in_tensor.shape[:-1]), 0, -1)
+        else:
+            features = torch.moveaxis(features.view(3 * self.num_components, *in_tensor.shape[:-1]), 0, -1)
 
         return features  # [..., 3 * Components]
 

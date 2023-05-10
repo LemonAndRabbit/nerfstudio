@@ -119,6 +119,10 @@ class TensoRFModelConfig(ModelConfig):
     # record_alpha_iters: Tuple[int, ...] = (0, 500, 1000, 1500, 2000, 2500, 3000, 3500, 4000, 4500, 5000)
     record_alpha_iters: Tuple[int, ...] = ()
     """specifies a list of iteration step numbers to record alpha mask"""
+    agg_mode: Literal["DEFAULT", "ADD", "MUL"] ='ADD'
+    """tensorf subfield aggregation mode"""
+    inner_mode: Literal["ADD", "MUL"] ='MUL'
+    """tensorf subfield inner mode"""
 
 
 
@@ -459,10 +463,14 @@ class TensoRFModel(Model):
             density_encoding = TensorVMSplitEncoding(
                 resolution=self.init_resolution,
                 num_components=self.num_den_components,
+                agg_mode=self.config.agg_mode,
+                inner_mode=self.config.inner_mode,
             )
             color_encoding = TensorVMSplitEncoding(
                 resolution=self.init_resolution,
                 num_components=self.num_color_components,
+                agg_mode=self.config.agg_mode,
+                inner_mode=self.config.inner_mode,
             )
         elif self.config.tensorf_encoding == "cp":
             density_encoding = TensorCPEncoding(

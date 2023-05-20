@@ -144,12 +144,42 @@ class NGPModel(Model):
     def get_training_callbacks(
         self, training_callback_attributes: TrainingCallbackAttributes
     ) -> List[TrainingCallback]:
+
         def update_occupancy_grid(step: int):
             # TODO: needs to get access to the sampler, on how the step size is determinated at each x. See
             # https://github.com/KAIR-BAIR/nerfacc/blob/127223b11401125a9fce5ce269bb0546ee4de6e8/examples/train_ngp_nerf.py#L190-L213
+
+            def occ_eval_fn(x):
+                if self.config.cone_angle > 0.0:
+                    all_train_cam_origins = training_callback_attributes.pipeline.datamanager.train_dataset.cameras.camera_to_worlds[:, :3, 3]
+                    all_train_cam_origins = all_train_cam_origins.to(x.device)
+                    camera_ids = torch.randint(
+                        0, all_train_cam_origins.shape[0], (x.shape[0],), device=x.device
+                    )
+                    # randomly sample a camera for computing step size.
+                    origin = all_train_cam_origins[camera_ids]
+                    t = (origin - x).norm(dim=-1, keepdim=True)
+                    # compute actual step size used in marching, based on the distance to the camera.
+                    step_size = torch.clamp(
+                        t * self.config.cone_angle, min=self.config.render_step_size
+                    )
+                    # filter out the points that are not in the near far plane.
+                    if (self.config.near_plane is not None) and (self.config.far_plane is not None):
+                        step_size = torch.where(
+                            (t > self.config.near_plane) & (t < self.config.far_plane),
+                            step_size,
+                            torch.zeros_like(step_size),
+                        )
+                else:
+                    step_size = self.config.render_step_size
+                # compute occupancy
+                density = self.field.density_fn(x)
+                return density * step_size
+
+
             self.occupancy_grid.every_n_step(
                 step=step,
-                occ_eval_fn=lambda x: self.field.get_opacity(x, self.config.render_step_size),
+                occ_eval_fn=occ_eval_fn,
             )
 
         return [

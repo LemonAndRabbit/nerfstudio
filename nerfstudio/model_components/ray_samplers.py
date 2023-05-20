@@ -404,7 +404,7 @@ class VolumetricSampler(Sampler):
             Function that returns the density of a point or None if a density function is not provided.
         """
 
-        if self.density_fn is None or not self.training:
+        if self.density_fn is None:
             return None
 
         density_fn = self.density_fn
@@ -465,12 +465,12 @@ class VolumetricSampler(Sampler):
         ray_indices, starts, ends = nerfacc.ray_marching(
             rays_o=rays_o,
             rays_d=rays_d,
-            t_min=t_min,
-            t_max=t_max,
+            # t_min=t_min,
+            # t_max=t_max,
             scene_aabb=self.scene_aabb,
             grid=self.occupancy_grid,
             # this is a workaround - using density causes crash and damage quality. should be fixed
-            sigma_fn=None,  # self.get_sigma_fn(rays_o, rays_d),
+            sigma_fn=self.get_sigma_fn(rays_o, rays_d),
             render_step_size=render_step_size,
             near_plane=near_plane,
             far_plane=far_plane,

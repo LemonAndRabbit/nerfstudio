@@ -188,18 +188,29 @@ method_configs["volinga"] = TrainerConfig(
 
 method_configs["instant-ngp"] = TrainerConfig(
     method_name="instant-ngp",
-    steps_per_eval_batch=500,
+    steps_per_eval_batch=0,
     steps_per_save=2000,
-    max_num_iterations=30000,
-    mixed_precision=True,
+    max_num_iterations=20000,
+    mixed_precision=False,
+    init_grad_scale=2.**10,
+    scale_gradients=True,
     pipeline=DynamicBatchPipelineConfig(
         datamanager=VanillaDataManagerConfig(dataparser=NerfstudioDataParserConfig(), train_num_rays_per_batch=8192),
-        model=InstantNGPModelConfig(eval_num_rays_per_chunk=8192),
+        model=InstantNGPModelConfig(
+            eval_num_rays_per_chunk=128,
+            background_color="random",
+            near_plane=0.2,
+            far_plane=1e4,
+            render_step_size=1e-2,
+            cone_angle=0.004,
+            grid_resolution=256,
+            ),
+        target_num_samples=1<<20,
     ),
     optimizers={
         "fields": {
-            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15),
-            "scheduler": None,
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, betas=(0.9,0.999)),
+            "scheduler": INGPSchedulerConfig(max_steps=20000),
         }
     },
     viewer=ViewerConfig(num_rays_per_chunk=64000),

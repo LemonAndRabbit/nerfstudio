@@ -430,6 +430,7 @@ class VolumetricSampler(Sampler):
         near_plane: float = 0.0,
         far_plane: Optional[float] = None,
         cone_angle: float = 0.0,
+        alpha_thre: float = 0.0,
     ) -> Tuple[RaySamples, TensorType["total_samples",]]:
         """Generate ray samples in a bounding box.
 
@@ -476,7 +477,7 @@ class VolumetricSampler(Sampler):
             far_plane=far_plane,
             stratified=self.training,
             cone_angle=cone_angle,
-            alpha_thre=1e-2,
+            alpha_thre=alpha_thre,
         )
         num_samples = starts.shape[0]
         if num_samples == 0:

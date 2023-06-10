@@ -514,6 +514,9 @@ class TensoRFModel(Model):
                 contraction_type=ContractionType.AABB
             )
 
+            if self.use_alpha_mask:
+                self.occupancy_grid._binary[:] = True
+
             # TODO: need to support other contraction types
             vol_sampler_aabb = self.scene_box.aabb
             self.sampler = VolumetricSampler(

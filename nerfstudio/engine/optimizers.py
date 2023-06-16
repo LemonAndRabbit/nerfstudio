@@ -18,7 +18,7 @@ Optimizers class.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Type
+from typing import Any, Dict, List, Optional, Type, Tuple
 
 import torch
 from torch.cuda.amp.grad_scaler import GradScaler
@@ -59,7 +59,7 @@ class AdamOptimizerConfig(OptimizerConfig):
     _target: Type = torch.optim.Adam
     weight_decay: float = 0
     """The weight decay to use."""
-    betas: List[int] = (0.9, 0.99)
+    betas: Tuple[float, ...] = (0.9, 0.99)
 
 
 @dataclass
@@ -86,7 +86,8 @@ class Optimizers:
         self.parameters = {}
         for param_group_name, params in param_groups.items():
             lr_init = config[param_group_name]["optimizer"].lr
-            self.optimizers[param_group_name] = config[param_group_name]["optimizer"].setup(params=params)
+            self.optimizers[param_group_name] = config[param_group_name]["optimizer"].setup(
+                params=params)
             self.parameters[param_group_name] = params
             if config[param_group_name]["scheduler"]:
                 self.schedulers[param_group_name] = (
@@ -127,7 +128,8 @@ class Optimizers:
             max_norm = self.config[param_group]["optimizer"].max_norm
             if max_norm is not None:
                 grad_scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(self.parameters[param_group], max_norm)
+                torch.nn.utils.clip_grad_norm_(
+                    self.parameters[param_group], max_norm)
             grad_scaler.step(optimizer)
 
     def optimizer_step_all(self) -> None:
@@ -136,7 +138,8 @@ class Optimizers:
             # note that they key is the parameter name
             max_norm = self.config[param_group]["optimizer"].max_norm
             if max_norm is not None:
-                torch.nn.utils.clip_grad_norm_(self.parameters[param_group], max_norm)
+                torch.nn.utils.clip_grad_norm_(
+                    self.parameters[param_group], max_norm)
             optimizer.step()
 
     def scheduler_step_all(self, step: int) -> None:
@@ -149,7 +152,8 @@ class Optimizers:
             scheduler.step()
             # TODO(ethan): clean this up. why is there indexing into a list?
             lr = scheduler.get_last_lr()[0]
-            writer.put_scalar(name=f"learning_rate/{param_group_name}", scalar=lr, step=step)
+            writer.put_scalar(
+                name=f"learning_rate/{param_group_name}", scalar=lr, step=step)
 
     def load_optimizers(self, loaded_state: Dict[str, Any]) -> None:
         """Helper to load the optimizer state from previous checkpoint

@@ -57,6 +57,7 @@ from nerfstudio.models.nerfplayer_nerfacto import NerfplayerNerfactoModelConfig
 from nerfstudio.models.nerfplayer_ngp import NerfplayerNGPModelConfig
 from nerfstudio.models.neus import NeuSModelConfig
 from nerfstudio.models.semantic_nerfw import SemanticNerfWModelConfig
+from nerfstudio.models.tensorf_mlp3d import TensoRFWithMLP3DModelConfig
 from nerfstudio.models.tensorf import TensoRFModelConfig
 from nerfstudio.models.vanilla_nerf import NeRFModel, VanillaModelConfig
 from nerfstudio.pipelines.base_pipeline import VanillaPipelineConfig
@@ -74,12 +75,41 @@ descriptions = {
     "semantic-nerfw": "Predicts semantic segmentations and filters out transient objects.",
     "vanilla-nerf": "Original NeRF model. (slow)",
     "tensorf": "tensorf",
+    "tensorf_mlp3d": "tensorf with mlp3d",
     "dnerf": "Dynamic-NeRF model. (slow)",
     "phototourism": "Uses the Phototourism data.",
     "nerfplayer-nerfacto": "NeRFPlayer with nerfacto backbone.",
     "nerfplayer-ngp": "NeRFPlayer with InstantNGP backbone.",
     "neus": "Implementation of NeuS. (slow)",
 }
+
+method_configs["tensorf_mlp3d"] = TrainerConfig(
+    method_name="tensorf_mlp3d",
+    steps_per_eval_batch=500,
+    steps_per_save=2000,
+    max_num_iterations=30000,
+    mixed_precision=False,
+    pipeline=VanillaPipelineConfig(
+        datamanager=VanillaDataManagerConfig(
+            dataparser=BlenderDataParserConfig(),
+            train_num_rays_per_batch=4096,
+            eval_num_rays_per_batch=1024,
+        ),
+        model=TensoRFWithMLP3DModelConfig(),
+    ),
+    optimizers={
+        "fields": {
+            "optimizer": AdamOptimizerConfig(lr=0.001),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.0001, max_steps=30000),
+        },
+        "encodings": {
+            "optimizer": AdamOptimizerConfig(lr=0.02),
+            "scheduler": ExponentialDecaySchedulerConfig(lr_final=0.002, max_steps=30000),
+        },
+    },
+    viewer=ViewerConfig(num_rays_per_chunk=1 << 15),
+    vis="viewer",
+)
 
 method_configs["nerfacto"] = TrainerConfig(
     method_name="nerfacto",
@@ -94,8 +124,10 @@ method_configs["nerfacto"] = TrainerConfig(
             eval_num_rays_per_batch=4096,
             camera_optimizer=CameraOptimizerConfig(
                 mode="SO3xR3",
-                optimizer=AdamOptimizerConfig(lr=6e-4, eps=1e-8, weight_decay=1e-2),
-                scheduler=ExponentialDecaySchedulerConfig(lr_final=6e-6, max_steps=200000),
+                optimizer=AdamOptimizerConfig(
+                    lr=6e-4, eps=1e-8, weight_decay=1e-2),
+                scheduler=ExponentialDecaySchedulerConfig(
+                    lr_final=6e-6, max_steps=200000),
             ),
         ),
         model=NerfactoModelConfig(eval_num_rays_per_chunk=1 << 15),
@@ -167,8 +199,10 @@ method_configs["volinga"] = TrainerConfig(
             hidden_dim_transient=32,
             num_nerf_samples_per_ray=24,
             proposal_net_args_list=[
-                {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 128, "use_linear": True},
-                {"hidden_dim": 16, "log2_hashmap_size": 17, "num_levels": 5, "max_res": 256, "use_linear": True},
+                {"hidden_dim": 16, "log2_hashmap_size": 17,
+                    "num_levels": 5, "max_res": 128, "use_linear": True},
+                {"hidden_dim": 16, "log2_hashmap_size": 17,
+                    "num_levels": 5, "max_res": 256, "use_linear": True},
             ],
         ),
     ),
@@ -195,7 +229,8 @@ method_configs["instant-ngp"] = TrainerConfig(
     init_grad_scale=2.**10,
     scale_gradients=True,
     pipeline=DynamicBatchPipelineConfig(
-        datamanager=VanillaDataManagerConfig(dataparser=NerfstudioDataParserConfig(), train_num_rays_per_batch=8192),
+        datamanager=VanillaDataManagerConfig(
+            dataparser=NerfstudioDataParserConfig(), train_num_rays_per_batch=8192),
         model=InstantNGPModelConfig(
             eval_num_rays_per_chunk=128,
             background_color="random",
@@ -204,12 +239,12 @@ method_configs["instant-ngp"] = TrainerConfig(
             render_step_size=1e-2,
             cone_angle=0.004,
             grid_resolution=256,
-            ),
-        target_num_samples=1<<20,
+        ),
+        target_num_samples=1 << 20,
     ),
     optimizers={
         "fields": {
-            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, betas=(0.9,0.999)),
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, betas=(0.9, 0.999)),
             "scheduler": INGPSchedulerConfig(max_steps=20000),
         }
     },
@@ -225,7 +260,8 @@ method_configs["instant-ngp-bounded"] = TrainerConfig(
     max_num_iterations=30000,
     mixed_precision=True,
     pipeline=DynamicBatchPipelineConfig(
-        datamanager=VanillaDataManagerConfig(dataparser=InstantNGPDataParserConfig(), train_num_rays_per_batch=8192),
+        datamanager=VanillaDataManagerConfig(
+            dataparser=InstantNGPDataParserConfig(), train_num_rays_per_batch=8192),
         model=InstantNGPModelConfig(
             eval_num_rays_per_chunk=8192,
             contraction_type=ContractionType.AABB,
@@ -254,7 +290,8 @@ method_configs["instant-ngp-zhifan"] = TrainerConfig(
     scale_gradients=True,
     init_grad_scale=2.**10,
     pipeline=DynamicBatchPipelineConfig(
-        datamanager=VanillaDataManagerConfig(dataparser=InstantNGPDataParserConfig(), train_num_rays_per_batch=8192),
+        datamanager=VanillaDataManagerConfig(
+            dataparser=InstantNGPDataParserConfig(), train_num_rays_per_batch=8192),
         model=InstantNGPModelConfig(
             eval_num_rays_per_chunk=8192,
             contraction_type=ContractionType.AABB,
@@ -267,7 +304,7 @@ method_configs["instant-ngp-zhifan"] = TrainerConfig(
     ),
     optimizers={
         "fields": {
-            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, betas=[0.9,0.999]),
+            "optimizer": AdamOptimizerConfig(lr=1e-2, eps=1e-15, betas=[0.9, 0.999]),
             "scheduler": INGPSchedulerConfig(max_steps=20000),
         }
     },
@@ -279,7 +316,8 @@ method_configs["instant-ngp-zhifan"] = TrainerConfig(
 method_configs["mipnerf"] = TrainerConfig(
     method_name="mipnerf",
     pipeline=VanillaPipelineConfig(
-        datamanager=VanillaDataManagerConfig(dataparser=NerfstudioDataParserConfig(), train_num_rays_per_batch=1024),
+        datamanager=VanillaDataManagerConfig(
+            dataparser=NerfstudioDataParserConfig(), train_num_rays_per_batch=1024),
         model=VanillaModelConfig(
             _target=MipNerfModel,
             loss_coefficients={"rgb_loss_coarse": 0.1, "rgb_loss_fine": 1.0},
@@ -373,7 +411,8 @@ method_configs["tensorf"] = TrainerConfig(
 method_configs["dnerf"] = TrainerConfig(
     method_name="dnerf",
     pipeline=VanillaPipelineConfig(
-        datamanager=VanillaDataManagerConfig(dataparser=DNeRFDataParserConfig()),
+        datamanager=VanillaDataManagerConfig(
+            dataparser=DNeRFDataParserConfig()),
         model=VanillaModelConfig(
             _target=NeRFModel,
             enable_temporal_distortion=True,
@@ -400,7 +439,8 @@ method_configs["phototourism"] = TrainerConfig(
     mixed_precision=True,
     pipeline=VanillaPipelineConfig(
         datamanager=VanillaDataManagerConfig(
-            dataparser=PhototourismDataParserConfig(),  # NOTE: one of the only differences with nerfacto
+            # NOTE: one of the only differences with nerfacto
+            dataparser=PhototourismDataParserConfig(),
             train_num_rays_per_batch=4096,
             eval_num_rays_per_batch=4096,
             camera_optimizer=CameraOptimizerConfig(
@@ -466,7 +506,8 @@ method_configs["nerfplayer-ngp"] = TrainerConfig(
     max_num_iterations=30000,
     mixed_precision=True,
     pipeline=DynamicBatchPipelineConfig(
-        datamanager=DepthDataManagerConfig(dataparser=DycheckDataParserConfig(), train_num_rays_per_batch=8192),
+        datamanager=DepthDataManagerConfig(
+            dataparser=DycheckDataParserConfig(), train_num_rays_per_batch=8192),
         model=NerfplayerNGPModelConfig(
             eval_num_rays_per_chunk=8192,
             contraction_type=ContractionType.AABB,
@@ -490,7 +531,8 @@ method_configs["neus"] = TrainerConfig(
     steps_per_eval_image=500,
     steps_per_eval_batch=5000,
     steps_per_save=20000,
-    steps_per_eval_all_images=1000000,  # set to a very large number so we don't eval with all images
+    # set to a very large number so we don't eval with all images
+    steps_per_eval_all_images=1000000,
     max_num_iterations=100000,
     mixed_precision=False,
     pipeline=VanillaPipelineConfig(
@@ -524,7 +566,8 @@ descriptions.update(external_descriptions)
 
 AnnotatedBaseConfigUnion = tyro.conf.SuppressFixed[  # Don't show unparseable (fixed) arguments in helptext.
     tyro.conf.FlagConversionOff[
-        tyro.extras.subcommand_type_from_defaults(defaults=method_configs, descriptions=descriptions)
+        tyro.extras.subcommand_type_from_defaults(
+            defaults=method_configs, descriptions=descriptions)
     ]
 ]
 """Union[] type over config types, annotated with default instances for use with

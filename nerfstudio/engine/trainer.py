@@ -68,7 +68,7 @@ class TrainerConfig(ExperimentConfig):
     """Number of steps between randomly sampled batches of rays."""
     steps_per_eval_image: int = 500
     """Number of steps between single eval images."""
-    steps_per_eval_all_images: int = 19999
+    steps_per_eval_all_images: int = 100000
     """Number of steps between eval all images."""
     max_num_iterations: int = 1000000
     """Maximum number of iterations to run."""
@@ -178,7 +178,8 @@ class Trainer:
         writer.setup_local_writer(
             self.config.logging, max_iter=self.config.max_num_iterations, banner_messages=banner_messages
         )
-        writer.put_config(name="config", config_dict=dataclasses.asdict(self.config), step=0)
+        writer.put_config(
+            name="config", config_dict=dataclasses.asdict(self.config), step=0)
         profiler.setup_profiler(self.config.logging)
 
     def setup_optimizers(self) -> Optimizers:
@@ -225,7 +226,8 @@ class Trainer:
 
                     # training callbacks after the training iteration
                     for callback in self.callbacks:
-                        callback.run_callback_at_location(step, location=TrainingCallbackLocation.AFTER_TRAIN_ITERATION)
+                        callback.run_callback_at_location(
+                            step, location=TrainingCallbackLocation.AFTER_TRAIN_ITERATION)
 
                 # Skip the first two steps to avoid skewed timings that break the viewer rendering speed estimate.
                 if step > 1:
@@ -240,9 +242,12 @@ class Trainer:
 
                 # a batch of train rays
                 if step_check(step, self.config.logging.steps_per_log, run_at_zero=True):
-                    writer.put_scalar(name="Train Loss", scalar=loss, step=step)
-                    writer.put_dict(name="Train Loss Dict", scalar_dict=loss_dict, step=step)
-                    writer.put_dict(name="Train Metrics Dict", scalar_dict=metrics_dict, step=step)
+                    writer.put_scalar(name="Train Loss",
+                                      scalar=loss, step=step)
+                    writer.put_dict(name="Train Loss Dict",
+                                    scalar_dict=loss_dict, step=step)
+                    writer.put_dict(name="Train Metrics Dict",
+                                    scalar_dict=metrics_dict, step=step)
 
                 # Do not perform evaluation if there are no validation images
                 if self.pipeline.datamanager.eval_dataset:
@@ -260,7 +265,8 @@ class Trainer:
         writer.write_out_storage()
 
         CONSOLE.rule()
-        CONSOLE.print("[bold green]:tada: :tada: :tada: Training Finished :tada: :tada: :tada:", justify="center")
+        CONSOLE.print(
+            "[bold green]:tada: :tada: :tada: Training Finished :tada: :tada: :tada:", justify="center")
         if not self.config.viewer.quit_on_train_completion:
             CONSOLE.print("Use ctrl+c to quit", justify="center")
             self._always_render(step)
@@ -309,7 +315,8 @@ class Trainer:
         with TimeWriter(writer, EventName.ITER_VIS_TIME, step=step) as _:
             num_rays_per_batch: int = self.pipeline.datamanager.get_train_rays_per_batch()
             try:
-                self.viewer_state.update_scene(self, step, self.pipeline.model, num_rays_per_batch)
+                self.viewer_state.update_scene(
+                    self, step, self.pipeline.model, num_rays_per_batch)
             except RuntimeError:
                 time.sleep(0.03)  # sleep to allow buffer to reset
                 assert self.viewer_state.vis is not None
@@ -329,7 +336,8 @@ class Trainer:
         train_num_rays_per_batch: int = self.pipeline.datamanager.get_train_rays_per_batch()
         writer.put_time(
             name=EventName.TRAIN_RAYS_PER_SEC,
-            duration=train_num_rays_per_batch / (train_t.duration - vis_t.duration),
+            duration=train_num_rays_per_batch /
+            (train_t.duration - vis_t.duration),
             step=step,
             avg_over_steps=True,
         )
@@ -342,13 +350,15 @@ class Trainer:
             if load_step is None:
                 print("Loading latest checkpoint from load_dir")
                 # NOTE: this is specific to the checkpoint name format
-                load_step = sorted(int(x[x.find("-") + 1 : x.find(".")]) for x in os.listdir(load_dir))[-1]
+                load_step = sorted(int(x[x.find("-") + 1: x.find(".")])
+                                   for x in os.listdir(load_dir))[-1]
             load_path: Path = load_dir / f"step-{load_step:09d}.ckpt"
             assert load_path.exists(), f"Checkpoint {load_path} does not exist"
             loaded_state = torch.load(load_path, map_location="cpu")
             self._start_step = loaded_state["step"] + 1
             # load the checkpoints for pipeline, optimizers, and gradient scalar
-            self.pipeline.load_pipeline(loaded_state["pipeline"], loaded_state["step"])
+            self.pipeline.load_pipeline(
+                loaded_state["pipeline"], loaded_state["step"])
             self.optimizers.load_optimizers(loaded_state["optimizers"])
             self.grad_scaler.load_state_dict(loaded_state["scalers"])
             CONSOLE.print(f"done loading checkpoint from {load_path}")
@@ -395,7 +405,8 @@ class Trainer:
         self.optimizers.zero_grad_all()
         cpu_or_cuda_str: str = self.device.split(":")[0]
         with torch.autocast(device_type=cpu_or_cuda_str, enabled=self.mixed_precision):
-            _, loss_dict, metrics_dict = self.pipeline.get_train_loss_dict(step=step)
+            _, loss_dict, metrics_dict = self.pipeline.get_train_loss_dict(
+                step=step)
             loss = functools.reduce(torch.add, loss_dict.values())
         self.grad_scaler.scale(loss).backward()  # type: ignore
         self.optimizers.optimizer_scaler_step_all(self.grad_scaler)
@@ -427,28 +438,36 @@ class Trainer:
         """
         # a batch of eval rays
         if step_check(step, self.config.steps_per_eval_batch):
-            _, eval_loss_dict, eval_metrics_dict = self.pipeline.get_eval_loss_dict(step=step)
+            _, eval_loss_dict, eval_metrics_dict = self.pipeline.get_eval_loss_dict(
+                step=step)
             eval_loss = functools.reduce(torch.add, eval_loss_dict.values())
             writer.put_scalar(name="Eval Loss", scalar=eval_loss, step=step)
-            writer.put_dict(name="Eval Loss Dict", scalar_dict=eval_loss_dict, step=step)
-            writer.put_dict(name="Eval Metrics Dict", scalar_dict=eval_metrics_dict, step=step)
+            writer.put_dict(name="Eval Loss Dict",
+                            scalar_dict=eval_loss_dict, step=step)
+            writer.put_dict(name="Eval Metrics Dict",
+                            scalar_dict=eval_metrics_dict, step=step)
 
         # one eval image
         if step_check(step, self.config.steps_per_eval_image):
             with TimeWriter(writer, EventName.TEST_RAYS_PER_SEC, write=False) as test_t:
-                metrics_dict, images_dict = self.pipeline.get_eval_image_metrics_and_images(step=step)
+                metrics_dict, images_dict = self.pipeline.get_eval_image_metrics_and_images(
+                    step=step)
             writer.put_time(
                 name=EventName.TEST_RAYS_PER_SEC,
                 duration=metrics_dict["num_rays"] / test_t.duration,
                 step=step,
                 avg_over_steps=True,
             )
-            writer.put_dict(name="Eval Images Metrics", scalar_dict=metrics_dict, step=step)
+            writer.put_dict(name="Eval Images Metrics",
+                            scalar_dict=metrics_dict, step=step)
             group = "Eval Images"
             for image_name, image in images_dict.items():
-                writer.put_image(name=group + "/" + image_name, image=image, step=step)
+                writer.put_image(name=group + "/" + image_name,
+                                 image=image, step=step)
 
         # all eval images
         if step_check(step, self.config.steps_per_eval_all_images):
-            metrics_dict = self.pipeline.get_average_eval_image_metrics(step=step)
-            writer.put_dict(name="Eval Images Metrics Dict (all images)", scalar_dict=metrics_dict, step=step)
+            metrics_dict = self.pipeline.get_average_eval_image_metrics(
+                step=step)
+            writer.put_dict(name="Eval Images Metrics Dict (all images)",
+                            scalar_dict=metrics_dict, step=step)

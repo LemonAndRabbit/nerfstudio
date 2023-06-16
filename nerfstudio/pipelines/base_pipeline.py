@@ -23,7 +23,10 @@ from dataclasses import dataclass, field
 from time import time
 from typing import Any, Dict, List, Mapping, Optional, Type, Union, cast
 
+from pathlib import Path
+
 import torch
+from torchvision.utils import save_image
 import torch.distributed as dist
 from rich.progress import (
     BarColumn,
@@ -48,6 +51,7 @@ from nerfstudio.engine.callbacks import TrainingCallback, TrainingCallbackAttrib
 from nerfstudio.models.base_model import Model, ModelConfig
 from nerfstudio.utils import profiler
 
+import sys
 
 def module_wrapper(ddp_or_model: Union[DDP, Model]) -> Model:
     """
@@ -336,7 +340,7 @@ class VanillaPipeline(Pipeline):
         return metrics_dict, images_dict
 
     @profiler.time_function
-    def get_average_eval_image_metrics(self, step: Optional[int] = None):
+    def get_average_eval_image_metrics(self, step: Optional[int] = None, error_map_log_dir: Optional[Path] = None):
         """Iterate over all the images in the eval dataset and get the average.
 
         Returns:
@@ -359,7 +363,7 @@ class VanillaPipeline(Pipeline):
                 height, width = camera_ray_bundle.shape
                 num_rays = height * width
                 outputs = self.model.get_outputs_for_camera_ray_bundle(camera_ray_bundle)
-                metrics_dict, _ = self.model.get_image_metrics_and_images(outputs, batch)
+                metrics_dict, images = self.model.get_image_metrics_and_images(outputs, batch)
                 assert "num_rays_per_sec" not in metrics_dict
                 metrics_dict["num_rays_per_sec"] = num_rays / (time() - inner_start)
                 fps_str = "fps"
@@ -367,6 +371,13 @@ class VanillaPipeline(Pipeline):
                 metrics_dict[fps_str] = metrics_dict["num_rays_per_sec"] / (height * width)
                 metrics_dict_list.append(metrics_dict)
                 progress.advance(task)
+                
+                if error_map_log_dir is not None:
+                    for key,val in images.items():
+                        filepath=error_map_log_dir / f"{batch['image_idx']}_{key}.png"
+                        val=val.permute(2,0,1) # HWC to CHW
+                        print("test save file to ",filepath)
+                        save_image(val, str(filepath))
         # average the metrics list
         metrics_dict = {}
         for key in metrics_dict_list[0].keys():

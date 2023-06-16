@@ -46,7 +46,7 @@ from nerfstudio.field_components.encodings import (
     TriplaneEncoding,
 )
 from nerfstudio.field_components.field_heads import FieldHeadNames
-from nerfstudio.fields.tensorf_field import TensoRFField
+from nerfstudio.fields.tensorf_mlp3d_field import TensoRFMLP3DField
 from nerfstudio.model_components.losses import MSELoss
 from nerfstudio.model_components.ray_samplers import PDFSampler, UniformSampler, VolumetricSampler
 from nerfstudio.model_components.renderers import (
@@ -63,10 +63,10 @@ from nerfacc import ContractionType
 
 
 @dataclass
-class TensoRFModelConfig(ModelConfig):
+class TensoRFWithMLP3DModelConfig(ModelConfig):
     """TensoRF model config"""
 
-    _target: Type = field(default_factory=lambda: TensoRFModel)
+    _target: Type = field(default_factory=lambda: TensoRFWithMLP3DModel)
     """target class to instantiate"""
     init_resolution: int = 128
     """initial render resolution"""
@@ -122,18 +122,18 @@ class TensoRFModelConfig(ModelConfig):
     """specifies a list of iteration step numbers to record alpha mask"""
 
 
-class TensoRFModel(Model):
+class TensoRFWithMLP3DModel(Model):
     """TensoRF Model
 
     Args:
         config: TensoRF configuration to instantiate model
     """
 
-    config: TensoRFModelConfig
+    config: TensoRFWithMLP3DModelConfig
 
     def __init__(
         self,
-        config: TensoRFModelConfig,
+        config: TensoRFWithMLP3DModelConfig,
         **kwargs,
     ) -> None:
         self.init_resolution = config.init_resolution
@@ -528,7 +528,7 @@ class TensoRFModel(Model):
         direction_encoding = NeRFEncoding(
             in_dim=3, num_frequencies=2, min_freq_exp=0, max_freq_exp=2)
 
-        self.field = TensoRFField(
+        self.field = TensoRFMLP3DField(
             self.scene_box.aabb,
             feature_encoding=feature_encoding,
             direction_encoding=direction_encoding,
@@ -600,6 +600,9 @@ class TensoRFModel(Model):
             list(self.field.mlp_head.parameters())
             + list(self.field.B.parameters())
             + list(self.field.field_output_rgb.parameters())
+            + list(self.field.mlp_base.parameters())
+            + list(self.field.bottleneck.parameters())
+            + list(self.field.field_output_density.parameters())
         )
         param_groups["encodings"] = list(self.field.color_encoding.parameters()) + list(
             self.field.density_encoding.parameters()

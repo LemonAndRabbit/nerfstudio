@@ -44,6 +44,7 @@ from nerfstudio.data.dataparsers.blender_dataparser import BlenderDataParserConf
 from nerfstudio.data.dataparsers.real360_dataparser import Real360DataParserConfig
 from nerfstudio.data.dataparsers.nsvf_dataparser import NSVFDataParserConfig
 from nerfstudio.data.dataparsers.tanks_dataparser import TanksDataParserConfig
+from nerfstudio.data.dataparsers.zju_dataparser import ZJUDataParserConfig
 from nerfstudio.data.dataparsers.dnerf_dataparser import DNeRFDataParserConfig
 from nerfstudio.data.dataparsers.dycheck_dataparser import DycheckDataParserConfig
 from nerfstudio.data.dataparsers.instant_ngp_dataparser import (
@@ -111,6 +112,7 @@ AnnotatedDataParserUnion = tyro.conf.OmitSubcommandPrefixes[  # Omit prefixes of
             "blender-data": BlenderDataParserConfig(),
             "nsvf-data": NSVFDataParserConfig(),
             "tanks-data": TanksDataParserConfig(),
+            "zju-data": ZJUDataParserConfig(),
             "real360-data": Real360DataParserConfig(),
             "instant-ngp-data": InstantNGPDataParserConfig(),
             "nuscenes-data": NuScenesDataParserConfig(),
